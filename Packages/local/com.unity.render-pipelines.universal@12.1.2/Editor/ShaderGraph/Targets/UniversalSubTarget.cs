@@ -8,7 +8,7 @@ using UnityEditor.VFX;
 
 namespace UnityEditor.Rendering.Universal.ShaderGraph
 {
-    abstract class UniversalSubTarget : SubTarget<UniversalTarget>, IHasMetadata
+    abstract class UniversalSubTarget : SubTarget<UniversalTarget>
 #if HAS_VFX_GRAPH
         , IRequireVFXContext
 #endif

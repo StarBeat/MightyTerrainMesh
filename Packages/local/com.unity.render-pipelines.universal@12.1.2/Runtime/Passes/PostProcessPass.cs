@@ -952,17 +952,17 @@ namespace UnityEngine.Rendering.Universal.Internal
             gpuView.SetColumn(3, new Vector4(0, 0, 0, 1));
             var gpuVP = gpuNonJitteredProj * camera.worldToCameraMatrix;
 
-            LensFlareCommonSRP.DoLensFlareDataDrivenCommon(m_Materials.lensFlareDataDriven, LensFlareCommonSRP.Instance, camera, (float)Screen.width, (float)Screen.height,
-                usePanini, paniniDistance, paniniCropToFit,
-                true,
-                camera.transform.position,
-                gpuVP,
-                cmd, source,
-                (Light light, Camera cam, Vector3 wo) => { return GetLensFlareLightAttenuation(light, cam, wo); },
-                ShaderConstants._FlareOcclusionTex, ShaderConstants._FlareOcclusionIndex,
-                ShaderConstants._FlareTex, ShaderConstants._FlareColorValue,
-                ShaderConstants._FlareData0, ShaderConstants._FlareData1, ShaderConstants._FlareData2, ShaderConstants._FlareData3, ShaderConstants._FlareData4,
-                false);
+            //LensFlareCommonSRP.DoLensFlareDataDrivenCommon(m_Materials.lensFlareDataDriven, LensFlareCommonSRP.Instance, camera, (float)Screen.width, (float)Screen.height,
+            //    usePanini, paniniDistance, paniniCropToFit,
+            //    true,
+            //    camera.transform.position,
+            //    gpuVP,
+            //    cmd, source,
+            //    (Light light, Camera cam, Vector3 wo) => { return GetLensFlareLightAttenuation(light, cam, wo); },
+            //    ShaderConstants._FlareOcclusionTex, ShaderConstants._FlareOcclusionIndex,
+            //    ShaderConstants._FlareTex, ShaderConstants._FlareColorValue,
+            //    ShaderConstants._FlareData0, ShaderConstants._FlareData1, ShaderConstants._FlareData2, ShaderConstants._FlareData3, ShaderConstants._FlareData4,
+            //    false);
         }
 
         #endregion

@@ -71,7 +71,7 @@ namespace UnityEditor.Rendering.Universal.ShaderGraph
         Both = 0        // = CullMode.Off -- render both faces
     }
 
-    sealed class UniversalTarget : Target, IHasMetadata, ILegacyTarget
+    sealed class UniversalTarget : Target, ILegacyTarget
 #if HAS_VFX_GRAPH
         , IMaySupportVFX, IRequireVFXContext
 #endif
@@ -663,27 +663,6 @@ namespace UnityEditor.Rendering.Universal.ShaderGraph
             }
         }
 
-        #region Metadata
-        string IHasMetadata.identifier
-        {
-            get
-            {
-                // defer to subtarget
-                if (m_ActiveSubTarget.value is IHasMetadata subTargetHasMetaData)
-                    return subTargetHasMetaData.identifier;
-                return null;
-            }
-        }
-
-        ScriptableObject IHasMetadata.GetMetadataObject()
-        {
-            // defer to subtarget
-            if (m_ActiveSubTarget.value is IHasMetadata subTargetHasMetaData)
-                return subTargetHasMetaData.GetMetadataObject();
-            return null;
-        }
-
-        #endregion
     }
 
     #region Passes
