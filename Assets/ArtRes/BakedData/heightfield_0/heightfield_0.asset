@@ -10,7 +10,7 @@ MonoBehaviour:
   m_Enabled: 1
   m_EditorHideFlags: 0
   m_Script: {fileID: 11500000, guid: 7422ed6567b40b346acdbf91d364934e, type: 3}
-  m_Name: heightfield_0
+  m_Name: 
   m_EditorClassIdentifier: 
   DetailMats:
   - {fileID: 2100000, guid: 7a3d81ad739ae0849aafad5263de3d93, type: 2}
@@ -39,7 +39,7 @@ MonoBehaviour:
     healthyColor: {r: 1, g: 1, b: 1, a: 1}
     dryColor: {r: 1, g: 1, b: 1, a: 1}
     maxDensity: 1
-    waterFloating: 1
+    waterFloating: 0
   - prototype: {fileID: 8976685920760456344, guid: 8fd5383d027ec5741880a29061024733,
       type: 3}
     minWidth: 2
@@ -50,7 +50,7 @@ MonoBehaviour:
     healthyColor: {r: 1, g: 1, b: 1, a: 1}
     dryColor: {r: 1, g: 1, b: 1, a: 1}
     maxDensity: 1
-    waterFloating: 1
+    waterFloating: 0
   - prototype: {fileID: 6601052348899811647, guid: ca7b709f99cc8994083ebb1bbfa2a4f8,
       type: 3}
     minWidth: 2

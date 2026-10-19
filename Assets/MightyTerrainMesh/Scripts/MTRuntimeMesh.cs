@@ -71,8 +71,16 @@
                 mMats = new Material[1];
                 mMats[0] = GameObject.Instantiate(mDataHeader.BakedMat);
             }
-            ClearRendererMaterial();
-            mRenderer.materials = mDataHeader.DetailMats;
+            if (MTClipmapController.Active && MTClipmapController.ClipmapMaterial != null)
+            {
+                // ClipmapVT 原型：直接使用 Clipmap 材质（全局采样），跳过 per-patch RTT VT
+                mRenderer.sharedMaterial = MTClipmapController.ClipmapMaterial;
+            }
+            else
+            {
+                ClearRendererMaterial();
+                mRenderer.materials = mDataHeader.DetailMats;
+            }
             //
             mDiameter = mRM.mesh.bounds.size.magnitude;
             mCenter = mRM.mesh.bounds.center + offset;
@@ -199,6 +207,8 @@
         }
         public void UpdatePatch(Vector3 viewCenter, float fov, float screenH, float screenW)
         {
+            if (MTClipmapController.Active)
+                return; // Clipmap 模式无需按 patch 请求 RTT
             int curTexSize = CalculateTextureSize(viewCenter, fov, screenH);
             if (curTexSize != mTextureSize)
             {

@@ -16,3 +16,4 @@ ProjectSettings/BurstAotSettings_Android.json
 ProjectSettings/CommonBurstAotSettings.json
 PPv2URPConverters.csproj
 UnityEngine.UI.csproj
+*.csproj

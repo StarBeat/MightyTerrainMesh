@@ -6,6 +6,9 @@ Shader "Hidden/Universal/CoreBlit"
         #pragma editor_sync_compilation
         #pragma multi_compile _ DISABLE_TEXTURE2D_X_ARRAY
         #pragma multi_compile _ BLIT_SINGLE_SLICE
+        // core 14 的 Blitter.cs 会对本 shader 创建 LocalKeyword "BLIT_DECODE_HDR"，
+        // 解码逻辑已随 core 14 Blit.hlsl 编进来，缺的只是关键字声明（URP14 起才在 CoreBlit.shader 声明）
+        #pragma multi_compile_local_fragment _ BLIT_DECODE_HDR
         // Core.hlsl for XR dependencies
         #include "Packages/com.unity.render-pipelines.universal/ShaderLibrary/Core.hlsl"
         #include "Packages/com.unity.render-pipelines.core/Runtime/Utilities/Blit.hlsl"
