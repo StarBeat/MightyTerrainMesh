@@ -3,7 +3,9 @@ namespace MightyTerrainMesh.EditorTools
     using System.Collections.Generic;
     using System.IO;
     using System.Linq;
+    using Unity.Burst;
     using Unity.Collections;
+    using Unity.Collections.LowLevel.Unsafe;
     using Unity.Jobs;
     using Unity.Mathematics;
     using UnityEditor;
@@ -238,6 +240,7 @@ namespace MightyTerrainMesh.EditorTools
 
             var manifest = new ClipmapManifest
             {
+                textureDataVersion = ClipmapManifest.CurrentTextureDataVersion,
                 originX = origin.x,
                 originZ = origin.z,
                 terrainSize = size,
@@ -246,8 +249,11 @@ namespace MightyTerrainMesh.EditorTools
                 blockRes = 0,
                 blockRects = new Rect[0], // 区域高精块已由瓦片金字塔取代（保留字段兼容旧数据）
                 texFormat = (int)fmtA,
+                texFormatN = (int)fmtN,
+                materialChannels = 1,
             };
 
+            var swTotal = System.Diagnostics.Stopwatch.StartNew();
             try
             {
                 // L7 粗源（Job 回退路径用）/ 静态层 L_K（全地形 S/2040 texel，完整 Mip 链：§4.1 离线生成）
@@ -265,7 +271,7 @@ namespace MightyTerrainMesh.EditorTools
 
                 File.WriteAllText(Path.Combine(outputRoot, "manifest.json"), JsonUtility.ToJson(manifest, true));
                 AssetDatabase.Refresh();
-                Debug.Log($"[ClipmapBaker] 完成：L7 {l7Res}² / L8 {l8Res}² / 格式 {format} → {outputRoot}");
+                Debug.Log($"[ClipmapBaker] 完成：L7 {l7Res}² / L8 {l8Res}² / 格式 {format} → {outputRoot}（总耗时 {swTotal.Elapsed.TotalSeconds:F1}s）");
             }
             finally
             {
@@ -278,6 +284,7 @@ namespace MightyTerrainMesh.EditorTools
             bool mipChain, TextureFormat fmtA, TextureFormat fmtN, string outputRoot)
         {
             EditorUtility.DisplayProgressBar("Clipmap Baker", name, 0f);
+            var sw = System.Diagnostics.Stopwatch.StartNew();
             var pxA = new NativeArray<Color32>(res * res, Allocator.TempJob);
             var pxN = new NativeArray<Color32>(res * res, Allocator.TempJob);
             try
@@ -302,11 +309,13 @@ namespace MightyTerrainMesh.EditorTools
 
                 string pathA = Path.Combine(outputRoot, name + "_albedo.bytes");
                 string pathN = Path.Combine(outputRoot, name + "_normal.bytes");
-                SaveClipmapTex(pxA, res, pathA, true, fmtA, mipChain);
-                SaveClipmapTex(pxN, res, pathN, false, fmtN, mipChain);
-                // 自检：回读 .bytes 与源像素比对，验证 保存→加载 往返一致（ASTC 有损，允许容差）
-                VerifyBakedTex(pathA, pxA, res, mipChain, true, name + "_albedo");
-                VerifyBakedTex(pathN, pxN, res, mipChain, false, name + "_normal");
+                SaveClipmapTex(pxA, res, pathA, true, fmtA, mipChain,
+                    TextureCompressionQuality.Normal, out var rawA);
+                SaveClipmapTex(pxN, res, pathN, false, fmtN, mipChain,
+                    TextureCompressionQuality.Normal, out var rawN);
+                VerifyBakedTex(pathA, rawA, res, mipChain, true, fmtA, name + "_albedo");
+                VerifyBakedTex(pathN, rawN, res, mipChain, false, fmtN, name + "_normal");
+                Debug.Log($"[ClipmapBaker] {name} 层完成：{res}²（耗时 {sw.Elapsed.TotalSeconds:F1}s）");
             }
             finally
             {
@@ -336,7 +345,7 @@ namespace MightyTerrainMesh.EditorTools
         /// <summary>金字塔向上合并时的 2×2 子块累积缓冲（(tileRes*2)² 组合区）。</summary>
         private class PyramidAccum
         {
-            public Color32[] a, n;
+            public NativeArray<Color32> a, n;
             public int arrived;
         }
 
@@ -390,55 +399,76 @@ namespace MightyTerrainMesh.EditorTools
 
             var pending = new Dictionary<long, PyramidAccum>[levels];
             for (int i = 0; i < levels; ++i) pending[i] = new Dictionary<long, PyramidAccum>();
-            // 父块优先扫描：同一父块的 2×2 子块连续烘焙，父块即时收尾释放——
-            // 同时挂起的累积器 ≈ 层数个（行优先扫描会挂起 ~gx 个，2040² 下单个 33MB 不可接受）
-            int gxP = (gx0 + 1) / 2;
-            int baked = 0;
-            for (int pz = 0; pz < gxP; ++pz)
-            for (int px = 0; px < gxP; ++px)
-            for (int dz = 0; dz < 2; ++dz)
-            for (int dx = 0; dx < 2; ++dx)
+            try
             {
-                int tx = px * 2 + dx, tz = pz * 2 + dz;
-                if (tx >= gx0 || tz >= gx0 || !bake0[tx, tz]) continue;
-                if (EditorUtility.DisplayCancelableProgressBar("瓦片金字塔",
-                        $"L0 {baked + 1}/{total0}  ({tx},{tz})", (float)baked / Mathf.Max(1, total0)))
+                // 父块优先扫描：同一父块的 2×2 子块连续烘焙，父块即时收尾释放——
+                // 同时挂起的累积器 ≈ 层数个（行优先扫描会挂起 ~gx 个，2040² 下单个 33MB 不可接受）
+                int gxP = (gx0 + 1) / 2;
+                int baked = 0;
+                var swL0 = System.Diagnostics.Stopwatch.StartNew();
+                for (int pz = 0; pz < gxP; ++pz)
+                for (int px = 0; px < gxP; ++px)
+                for (int dz = 0; dz < 2; ++dz)
+                for (int dx = 0; dx < 2; ++dx)
                 {
-                    Debug.LogWarning("[ClipmapBaker] 金字塔烘焙已取消（tiles/ 不完整，请重新完整烘焙）");
-                    return baked;
-                }
-                BakeTileDirect(src, origin, tileRes, tileWorld0, 0, tx, tz, fmtA, fmtN, tileDir, out var pxA, out var pxN);
-                PropagatePyramid(pending, levels, size, tileRes, tileWorld0, 0, tx, tz, pxA, pxN, fmtA, fmtN, tileDir, directFrom);
-                pxA.Dispose(); pxN.Dispose();
-                ++baked;
-            }
-            // 全量模式下所有父块应收尾完毕；区域模式下区域边缘之外的父块不生成属预期
-            if (fullCoverage)
-                for (int i = 0; i < levels; ++i)
-                    if (pending[i].Count != 0)
-                        Debug.LogWarning($"[ClipmapBaker] 金字塔第 {i} 级有 {pending[i].Count} 个父块未收尾（网格非 2 幂？）");
-
-            // ---- 粗级全量直接烘焙（区域模式；j = directFrom..levels-1）----
-            for (int lvl = Mathf.Max(1, directFrom); lvl < levels; ++lvl)
-            {
-                float tw = tileWorld0 * (1 << lvl);
-                int gc = Mathf.Max(1, Mathf.CeilToInt(size / tw));
-                int total = gc * gc, done = 0;
-                for (int tz = 0; tz < gc; ++tz)
-                for (int tx = 0; tx < gc; ++tx)
-                {
-                    if (EditorUtility.DisplayCancelableProgressBar("瓦片金字塔（粗级全量）",
-                            $"L{lvl} {done + 1}/{total}  ({tx},{tz})", (float)done / total))
+                    int tx = px * 2 + dx, tz = pz * 2 + dz;
+                    if (tx >= gx0 || tz >= gx0 || !bake0[tx, tz]) continue;
+                    if (EditorUtility.DisplayCancelableProgressBar("瓦片金字塔",
+                            $"L0 {baked + 1}/{total0}  ({tx},{tz})", (float)baked / Mathf.Max(1, total0)))
                     {
                         Debug.LogWarning("[ClipmapBaker] 金字塔烘焙已取消（tiles/ 不完整，请重新完整烘焙）");
                         return baked;
                     }
-                    BakeTileDirect(src, origin, tileRes, tw, lvl, tx, tz, fmtA, fmtN, tileDir, out var dA, out var dN);
-                    dA.Dispose(); dN.Dispose();
-                    ++done;
+                    BakeTileDirect(src, origin, tileRes, tileWorld0, 0, tx, tz, fmtA, fmtN, tileDir, out var pxA, out var pxN);
+                    PropagatePyramid(pending, levels, size, tileRes, tileWorld0, 0, tx, tz, pxA, pxN, fmtA, fmtN, tileDir, directFrom);
+                    pxA.Dispose(); pxN.Dispose();
+                    ++baked;
                 }
+                // 全量模式下所有父块应收尾完毕；区域模式下区域边缘之外的父块不生成属预期
+                if (fullCoverage)
+                    for (int i = 0; i < levels; ++i)
+                        if (pending[i].Count != 0)
+                            Debug.LogWarning($"[ClipmapBaker] 金字塔第 {i} 级有 {pending[i].Count} 个父块未收尾（网格非 2 幂？）");
+                Debug.Log($"[ClipmapBaker] 金字塔 L0+逐级传播完成：{baked}/{total0} 片（耗时 {swL0.Elapsed.TotalSeconds:F1}s）");
+
+                // ---- 粗级全量直接烘焙（区域模式；j = directFrom..levels-1）----
+                for (int lvl = Mathf.Max(1, directFrom); lvl < levels; ++lvl)
+                {
+                    var swLvl = System.Diagnostics.Stopwatch.StartNew();
+                    float tw = tileWorld0 * (1 << lvl);
+                    int gc = Mathf.Max(1, Mathf.CeilToInt(size / tw));
+                    int total = gc * gc, done = 0;
+                    for (int tz = 0; tz < gc; ++tz)
+                    for (int tx = 0; tx < gc; ++tx)
+                    {
+                        if (EditorUtility.DisplayCancelableProgressBar("瓦片金字塔（粗级全量）",
+                                $"L{lvl} {done + 1}/{total}  ({tx},{tz})", (float)done / total))
+                        {
+                            Debug.LogWarning("[ClipmapBaker] 金字塔烘焙已取消（tiles/ 不完整，请重新完整烘焙）");
+                            return baked;
+                        }
+                        BakeTileDirect(src, origin, tileRes, tw, lvl, tx, tz, fmtA, fmtN, tileDir, out var dA, out var dN);
+                        dA.Dispose(); dN.Dispose();
+                        ++done;
+                    }
+                    Debug.Log($"[ClipmapBaker] 金字塔 L{lvl} 粗级全量完成：{done} 片（耗时 {swLvl.Elapsed.TotalSeconds:F1}s）");
+                }
+                return baked;
             }
-            return baked;
+            finally
+            {
+                DisposePending(pending);
+            }
+        }
+
+        private static void DisposePending(Dictionary<long, PyramidAccum>[] pending)
+        {
+            foreach (var map in pending)
+            foreach (var kv in map)
+            {
+                kv.Value.a.Dispose();
+                kv.Value.n.Dispose();
+            }
         }
 
         /// <summary>按 (lvl, tx, tz) 的世界矩形从地形直接采样一片瓦片并保存。</summary>
@@ -475,11 +505,18 @@ namespace MightyTerrainMesh.EditorTools
             long key = ((long)px << 20) | (uint)pz;
             if (!map.TryGetValue(key, out var acc))
             {
-                acc = new PyramidAccum { a = new Color32[tileRes * tileRes], n = new Color32[tileRes * tileRes] };
+                acc = new PyramidAccum
+                {
+                    a = new NativeArray<Color32>(tileRes * tileRes, Allocator.Persistent),
+                    n = new NativeArray<Color32>(tileRes * tileRes, Allocator.Persistent)
+                };
                 map.Add(key, acc);
             }
-            CopyQuadrantSmall(Downsample2x(cA, tileRes), acc.a, q, qx, qz);
-            CopyQuadrantSmall(Downsample2x(cN, tileRes), acc.n, q, qx, qz);
+            Downsample2x(cA, cN, tileRes, out var downA, out var downN);
+            CopyQuadrantSmall(downA, acc.a, q, qx, qz);
+            CopyQuadrantSmall(downN, acc.n, q, qx, qz);
+            downA.Dispose();
+            downN.Dispose();
             acc.arrived++;
             // 该父块在 level 网格内的实际子块数（地形边缘不足 2×2）
             int gc = Mathf.Max(1, Mathf.CeilToInt(terrainSize / (tileWorld0 * (1 << level))));
@@ -496,56 +533,74 @@ namespace MightyTerrainMesh.EditorTools
                 CopyQuadrantFrom(acc.n, q, Mathf.Min(x, maxQx), Mathf.Min(z, maxQz), x, z);
             }
             map.Remove(key);
-            var nA = new NativeArray<Color32>(acc.a, Allocator.TempJob);
-            var nN = new NativeArray<Color32>(acc.n, Allocator.TempJob);
-            SaveClipmapTex(nA, tileRes, TilePath(tileDir, level + 1, px, pz, true), true, fmtA, false, TextureCompressionQuality.Normal);
-            SaveClipmapTex(nN, tileRes, TilePath(tileDir, level + 1, px, pz, false), false, fmtN, false, TextureCompressionQuality.Normal);
-            PropagatePyramid(pending, levels, terrainSize, tileRes, tileWorld0, level + 1, px, pz, nA, nN, fmtA, fmtN, tileDir, stopBeforeLevel);
-            nA.Dispose(); nN.Dispose();
+            try
+            {
+                SaveClipmapTex(acc.a, tileRes, TilePath(tileDir, level + 1, px, pz, true), true, fmtA, false, TextureCompressionQuality.Normal);
+                SaveClipmapTex(acc.n, tileRes, TilePath(tileDir, level + 1, px, pz, false), false, fmtN, false, TextureCompressionQuality.Normal);
+                PropagatePyramid(pending, levels, terrainSize, tileRes, tileWorld0, level + 1, px, pz, acc.a, acc.n, fmtA, fmtN, tileDir, stopBeforeLevel);
+            }
+            finally
+            {
+                acc.a.Dispose();
+                acc.n.Dispose();
+            }
         }
 
         private static string TilePath(string tileDir, int level, int tx, int tz, bool albedo)
             => Path.Combine(tileDir, $"l{level}_{tx}_{tz}_{(albedo ? "albedo" : "normal")}.bytes");
 
         /// <summary>(q×q) 小块写入父缓冲（(2q)×(2q)）的 (qx,qz) 象限。</summary>
-        private static void CopyQuadrantSmall(Color32[] src, Color32[] dst, int q, int qx, int qz)
+        private static void CopyQuadrantSmall(NativeArray<Color32> src, NativeArray<Color32> dst, int q, int qx, int qz)
         {
             int big = q * 2;
             for (int y = 0; y < q; ++y)
-                System.Array.Copy(src, y * q, dst, (qz * q + y) * big + qx * q, q);
+                NativeArray<Color32>.Copy(src, y * q, dst, (qz * q + y) * big + qx * q, q);
         }
 
         /// <summary>父缓冲（(2q)×(2q)）内象限间复制（边缘补齐用）。</summary>
-        private static void CopyQuadrantFrom(Color32[] buf, int q, int sx, int sz, int dx, int dz)
+        private static void CopyQuadrantFrom(NativeArray<Color32> buf, int q, int sx, int sz, int dx, int dz)
         {
             int big = q * 2;
             for (int y = 0; y < q; ++y)
-                System.Array.Copy(buf, (sz * q + y) * big + sx * q,
+                NativeArray<Color32>.Copy(buf, (sz * q + y) * big + sx * q,
                     buf, (dz * q + y) * big + dx * q, q);
         }
 
-        /// <summary>
-        /// 2×2 盒滤波降采样（srcRes → srcRes/2），RGB 带舍入平均；
-        /// A 通道是细节层索引（语义不可平均），用多数表决（并列取 c00）。
-        /// </summary>
-        private static Color32[] Downsample2x(NativeArray<Color32> src, int srcRes)
+        [BurstCompile]
+        private struct Downsample2xJob : IJobParallelFor
         {
-            int dst = srcRes / 2;
-            var o = new Color32[dst * dst];
-            for (int y = 0; y < dst; ++y)
-            for (int x = 0; x < dst; ++x)
+            [ReadOnly] public NativeArray<Color32> src;
+            [WriteOnly] public NativeArray<Color32> dst;
+            public int srcRes;
+            public int dstRes;
+
+            public void Execute(int index)
             {
+                int x = index % dstRes;
+                int y = index / dstRes;
                 var c00 = src[(2 * y) * srcRes + 2 * x];
                 var c10 = src[(2 * y) * srcRes + 2 * x + 1];
                 var c01 = src[(2 * y + 1) * srcRes + 2 * x];
                 var c11 = src[(2 * y + 1) * srcRes + 2 * x + 1];
-                o[y * dst + x] = new Color32(
+                dst[index] = new Color32(
                     (byte)((c00.r + c10.r + c01.r + c11.r + 2) / 4),
                     (byte)((c00.g + c10.g + c01.g + c11.g + 2) / 4),
                     (byte)((c00.b + c10.b + c01.b + c11.b + 2) / 4),
                     Vote(c00.a, c10.a, c01.a, c11.a));
             }
-            return o;
+        }
+
+        /// <summary>albedo/normal 并行做 2×2 盒滤波，RGB 带舍入平均，A 通道多数表决（并列取 c00）。</summary>
+        private static void Downsample2x(NativeArray<Color32> srcA, NativeArray<Color32> srcN, int srcRes,
+            out NativeArray<Color32> dstA, out NativeArray<Color32> dstN)
+        {
+            int dstRes = srcRes / 2;
+            int count = dstRes * dstRes;
+            dstA = new NativeArray<Color32>(count, Allocator.TempJob);
+            dstN = new NativeArray<Color32>(count, Allocator.TempJob);
+            var hA = new Downsample2xJob { src = srcA, dst = dstA, srcRes = srcRes, dstRes = dstRes }.Schedule(count, 64);
+            var hN = new Downsample2xJob { src = srcN, dst = dstN, srcRes = srcRes, dstRes = dstRes }.Schedule(count, 64);
+            JobHandle.CompleteAll(ref hA, ref hN);
         }
 
         /// <summary>4 候选多数表决：任何出现 ≥2 次的值胜出，全不同取 a。</summary>
@@ -557,74 +612,78 @@ namespace MightyTerrainMesh.EditorTools
             return a;
         }
 
-        /// <summary>保存为 .bytes（12B 头 w/h/fmt + 原始纹理数据）。targetFmt != RGBA32 时走 CompressTexture。</summary>
+        /// <summary>保存为纯 raw .bytes；尺寸和格式写入 manifest。targetFmt != RGBA32 时走 CompressTexture。</summary>
         private static void SaveClipmapTex(NativeArray<Color32> px, int res, string path, bool sRGB,
             TextureFormat targetFmt, bool mipChain,
-            TextureCompressionQuality quality = TextureCompressionQuality.Best)
+            TextureCompressionQuality quality = TextureCompressionQuality.Normal)
+        {
+            SaveClipmapTex(px, res, path, sRGB, targetFmt, mipChain, quality, false, out _);
+        }
+
+        private static void SaveClipmapTex(NativeArray<Color32> px, int res, string path, bool sRGB,
+            TextureFormat targetFmt, bool mipChain, TextureCompressionQuality quality, out byte[] raw)
+        {
+            SaveClipmapTex(px, res, path, sRGB, targetFmt, mipChain, quality, true, out raw);
+        }
+
+        private static void SaveClipmapTex(NativeArray<Color32> px, int res, string path, bool sRGB,
+            TextureFormat targetFmt, bool mipChain, TextureCompressionQuality quality,
+            bool captureRaw, out byte[] raw)
         {
             var tex = new Texture2D(res, res, TextureFormat.RGBA32, mipChain, !sRGB);
             tex.SetPixelData(px, 0);
             tex.Apply(mipChain); // mipChain=true 时离线生成完整 Mip 链（§4.1）
-            TextureFormat fmt = TextureFormat.RGBA32;
             if (targetFmt != TextureFormat.RGBA32)
-            {
                 EditorUtility.CompressTexture(tex, targetFmt, quality);
-                fmt = targetFmt;
-            }
-            // 含全部 mip 级，运行时 LoadRawTextureData 整体读回。
-            // 注意：2018.3+ 返回 NativeArray<byte>（实例 ToArray），更早版本返回 byte[]
-            // （走 System.Linq 扩展 ToArray）——两种情况下本行均可编译。
-            byte[] raw = tex.GetRawTextureData().ToArray();
-            using (var fs = new FileStream(path, FileMode.Create))
-            using (var bw = new BinaryWriter(fs))
-            {
-                bw.Write(res);
-                bw.Write(res);
-                bw.Write((int)fmt);
-                bw.Write(raw);
-            }
+            var nativeRaw = tex.GetRawTextureData<byte>();
+            raw = captureRaw ? nativeRaw.ToArray() : null;
+            WriteRaw(path, nativeRaw);
             Object.DestroyImmediate(tex);
         }
 
+        private static unsafe void WriteRaw(string path, NativeArray<byte> raw)
+        {
+            using (var fs = new FileStream(path, FileMode.Create, FileAccess.Write, FileShare.None,
+                       64 * 1024, FileOptions.SequentialScan))
+            {
+                var data = new System.ReadOnlySpan<byte>(
+                    (byte*)NativeArrayUnsafeUtility.GetUnsafeReadOnlyPtr(raw), raw.Length);
+                fs.Write(data);
+            }
+        }
+
         /// <summary>
-        /// 烘焙自检：按 .bytes 头重建纹理并回读 mip0，与源像素在角点/中心采样比对。
-        /// 失败说明 保存→加载 链路（格式/头/mip 布局）不一致，错误会直接打在 Console。
+        /// 烘焙自检：按配置重建并上传纹理，再对完整原始数据（含 mip 链）做零容差字节比对。
+        /// 失败说明 保存→加载 链路（格式/尺寸/mip 布局）不一致，错误会直接打在 Console。
         /// </summary>
-        private static void VerifyBakedTex(string path, NativeArray<Color32> src, int res, bool mipChain, bool sRGB, string name)
+        private static void VerifyBakedTex(string path, byte[] expectedRaw, int res, bool mipChain, bool sRGB,
+            TextureFormat fmt, string name)
         {
             try
             {
                 var bytes = File.ReadAllBytes(path);
-                int w = System.BitConverter.ToInt32(bytes, 0);
-                int h = System.BitConverter.ToInt32(bytes, 4);
-                var fmt = (TextureFormat)System.BitConverter.ToInt32(bytes, 8);
-                var tex = new Texture2D(w, h, fmt, mipChain, !sRGB);
-                var payload = new byte[bytes.Length - 12];
-                System.Buffer.BlockCopy(bytes, 12, payload, 0, payload.Length);
-                tex.LoadRawTextureData(payload);
+                var tex = new Texture2D(res, res, fmt, mipChain, !sRGB);
+                tex.LoadRawTextureData(bytes);
                 tex.Apply(false);
-                var rb = tex.GetPixels32(); // mip0
-                Object.DestroyImmediate(tex);
-                if (rb.Length != src.Length)
+                var rb = tex.GetRawTextureData();
+                if (rb.Length != expectedRaw.Length)
                 {
-                    Debug.LogError($"[ClipmapBaker] 自检失败 {name}：回读像素数 {rb.Length} != 源 {src.Length}");
+                    Debug.LogError($"[ClipmapBaker] 自检失败 {name}：回读字节数 {rb.Length} != 基准 {expectedRaw.Length}");
+                    Object.DestroyImmediate(tex);
                     return;
                 }
-                int maxErr = 0;
-                int[] samples = { 0, res / 2 + (res / 2) * res, res * res - 1 };
-                foreach (var i in samples)
+                int diff = -1;
+                for (int i = 0; i < rb.Length; ++i)
                 {
-                    Color32 a = src[i], b = rb[i];
-                    maxErr = Mathf.Max(maxErr, Mathf.Abs(a.r - b.r), Mathf.Abs(a.g - b.g),
-                        Mathf.Abs(a.b - b.b), Mathf.Abs(a.a - b.a));
+                    if (rb[i] == expectedRaw[i]) continue;
+                    diff = i;
+                    break;
                 }
-                // ASTC 有损：编解码损耗可达 ~20/255（法线等高频内容），容差放宽；
-                // 真正的链路错误（格式/布局/sRGB 错乱）偏差在 60+ 量级，依然能抓住
-                int tolerance = fmt == TextureFormat.RGBA32 ? 0 : 24;
-                if (maxErr <= tolerance)
-                    Debug.Log($"[ClipmapBaker] 自检通过 {name}（采样最大误差 {maxErr}/255，容差 {tolerance}）");
+                if (diff < 0)
+                    Debug.Log($"[ClipmapBaker] 自检通过 {name}（{rb.Length} 字节回读一致）");
                 else
-                    Debug.LogError($"[ClipmapBaker] 自检失败 {name}：回读与源数据偏差 {maxErr}/255（容差 {tolerance}）");
+                    Debug.LogError($"[ClipmapBaker] 自检失败 {name}：首处差异位于字节 {diff}");
+                Object.DestroyImmediate(tex);
             }
             catch (System.Exception e)
             {

@@ -139,7 +139,7 @@ namespace MightyTerrainMesh.EditorTools
                         MTTerrainBakePipeline.RecommendClipmapResolutions(ts, out _l7Res, out _l8Res);
                 }
                 _bakeFormat = (MTTerrainBakePipeline.ClipmapBakeFormat)EditorGUILayout.EnumPopup(
-                    new GUIContent("压缩格式（§10）", "ASTC=移动端（编辑器 D3D11 无硬件 ASTC 会解码回退，2040² 下内存大）；BC7=DX/桌面（编辑器测试建议）；RGBA32=未压缩"),
+                    new GUIContent("压缩格式（§10）", "ASTC=移动端；BC7=DX/桌面；RGBA32=未压缩。目标平台必须支持所选格式"),
                     _bakeFormat);
                 _bakePyramid = EditorGUILayout.ToggleLeft(
                     "瓦片金字塔（§7.1 流式契约：L0 = 32m@2040²，运行时异步流式 + 直拷）", _bakePyramid);

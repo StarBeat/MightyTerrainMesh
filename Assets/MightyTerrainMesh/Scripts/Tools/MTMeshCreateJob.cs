@@ -391,23 +391,23 @@
         private void MergeCorners(List<SampleVertexData> l0, List<SampleVertexData> l1, List<SampleVertexData> l2,
             List<SampleVertexData> l3)
         {
-            List<SampleVertexData> lvers = new List<SampleVertexData>();
-            //lb
-            lvers.Add(l0[0]);
-            if (l1 != null)
-                lvers.Add(l1[0]);
-            if (l2 != null)
-                lvers.Add(l2[0]);
-            if (l3 != null)
-                lvers.Add(l3[0]);
+            List<SampleVertexData> lvers = new List<SampleVertexData>(4);
+            if (l0 != null && l0.Count > 0) lvers.Add(l0[0]);
+            if (l1 != null && l1.Count > 0) lvers.Add(l1[0]);
+            if (l2 != null && l2.Count > 0) lvers.Add(l2[0]);
+            if (l3 != null && l3.Count > 0) lvers.Add(l3[0]);
+            if (lvers.Count == 0) return;
             Vector3 normal = AverageNormal(lvers);
-            l0[0].Normal = normal;
-            if (l1 != null)
-                l1[0].Normal = normal;
-            if (l2 != null)
-                l2[0].Normal = normal;
-            if (l3 != null)
-                l3[0].Normal = normal;
+            if (l0 != null && l0.Count > 0) l0[0].Normal = normal;
+            if (l1 != null && l1.Count > 0) l1[0].Normal = normal;
+            if (l2 != null && l2.Count > 0) l2[0].Normal = normal;
+            if (l3 != null && l3.Count > 0) l3[0].Normal = normal;
+        }
+
+        private static List<SampleVertexData> GetCorner(SamplerTree tree, byte corner)
+        {
+            if (tree == null) return null;
+            return tree.Boundaries.TryGetValue(corner, out var boundary) ? boundary : null;
         }
         private void StitchCorner(int x, int z)
         {
@@ -427,21 +427,21 @@
             SamplerTree right_down = GetSubTree(x + 1, z - 1);
             if (!center.StitchedBorders.Contains(SamplerTree.LBCorner))
             {
-                MergeCorners(center.Boundaries[SamplerTree.LBCorner],
-                    left != null ? left.Boundaries[SamplerTree.RBCorner] : null,
-                    left_down != null ? left_down.Boundaries[SamplerTree.RTCorner] : null,
-                    down != null ? down.Boundaries[SamplerTree.LTCorner] : null);
+                MergeCorners(GetCorner(center, SamplerTree.LBCorner),
+                    GetCorner(left, SamplerTree.RBCorner),
+                    GetCorner(left_down, SamplerTree.RTCorner),
+                    GetCorner(down, SamplerTree.LTCorner));
                 center.StitchedBorders.Add(SamplerTree.LBCorner);
                 if (left != null) left.StitchedBorders.Add(SamplerTree.RBCorner);
                 if (left_down != null) left_down.StitchedBorders.Add(SamplerTree.RTCorner);
-                if (down != null) left.StitchedBorders.Add(SamplerTree.LTCorner);
+                if (down != null) down.StitchedBorders.Add(SamplerTree.LTCorner);
             }
             if (!center.StitchedBorders.Contains(SamplerTree.RBCorner))
             {
-                MergeCorners(center.Boundaries[SamplerTree.RBCorner],
-                    right != null ? right.Boundaries[SamplerTree.LBCorner] : null,
-                    right_down != null ? right_down.Boundaries[SamplerTree.LTCorner] : null,
-                    down != null ? down.Boundaries[SamplerTree.RTCorner] : null);
+                MergeCorners(GetCorner(center, SamplerTree.RBCorner),
+                    GetCorner(right, SamplerTree.LBCorner),
+                    GetCorner(right_down, SamplerTree.LTCorner),
+                    GetCorner(down, SamplerTree.RTCorner));
                 center.StitchedBorders.Add(SamplerTree.RBCorner);
                 if (right != null) right.StitchedBorders.Add(SamplerTree.LBCorner);
                 if (right_down != null) right_down.StitchedBorders.Add(SamplerTree.LTCorner);
@@ -449,10 +449,10 @@
             }
             if (!center.StitchedBorders.Contains(SamplerTree.LTCorner))
             {
-                MergeCorners(center.Boundaries[SamplerTree.LTCorner],
-                    left != null ? left.Boundaries[SamplerTree.RTCorner] : null,
-                    left_top != null ? left_top.Boundaries[SamplerTree.RBCorner] : null,
-                    top != null ? top.Boundaries[SamplerTree.LBCorner] : null);
+                MergeCorners(GetCorner(center, SamplerTree.LTCorner),
+                    GetCorner(left, SamplerTree.RTCorner),
+                    GetCorner(left_top, SamplerTree.RBCorner),
+                    GetCorner(top, SamplerTree.LBCorner));
                 center.StitchedBorders.Add(SamplerTree.LTCorner);
                 if (left != null) left.StitchedBorders.Add(SamplerTree.RTCorner);
                 if (left_top != null) left_top.StitchedBorders.Add(SamplerTree.RBCorner);
@@ -461,10 +461,10 @@
 
             if (!center.StitchedBorders.Contains(SamplerTree.RTCorner))
             {
-                MergeCorners(center.Boundaries[SamplerTree.RTCorner],
-                    right != null ? right.Boundaries[SamplerTree.LTCorner] : null,
-                    right_top != null ? right_top.Boundaries[SamplerTree.LBCorner] : null,
-                    top != null ? top.Boundaries[SamplerTree.RBCorner] : null);
+                MergeCorners(GetCorner(center, SamplerTree.RTCorner),
+                    GetCorner(right, SamplerTree.LTCorner),
+                    GetCorner(right_top, SamplerTree.LBCorner),
+                    GetCorner(top, SamplerTree.RBCorner));
                 center.StitchedBorders.Add(SamplerTree.RTCorner);
                 if (right != null) right.StitchedBorders.Add(SamplerTree.LTCorner);
                 if (right_top != null) right_top.StitchedBorders.Add(SamplerTree.LBCorner);

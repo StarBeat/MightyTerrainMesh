@@ -43,8 +43,20 @@ namespace MightyTerrainMesh
         [ReadOnly] public NativeArray<Color32> layerPix1;
         [ReadOnly] public NativeArray<Color32> layerPix2;
         [ReadOnly] public NativeArray<Color32> layerPix3;
+        [ReadOnly] public NativeArray<Color32> normalPix0;
+        [ReadOnly] public NativeArray<Color32> normalPix1;
+        [ReadOnly] public NativeArray<Color32> normalPix2;
+        [ReadOnly] public NativeArray<Color32> normalPix3;
+        [ReadOnly] public NativeArray<Color32> maskPix0;
+        [ReadOnly] public NativeArray<Color32> maskPix1;
+        [ReadOnly] public NativeArray<Color32> maskPix2;
+        [ReadOnly] public NativeArray<Color32> maskPix3;
         public int4 layerSize;      // 各层纹理宽（0 = 无）
         public int4 layerSizeH;     // 各层纹理高
+        public int4 normalSize;
+        public int4 normalSizeH;
+        public int4 maskSize;
+        public int4 maskSizeH;
         public float4 tileSizeX;
         public float4 tileSizeY;
         public float4 tileOffX;     // TerrainLayer.tileOffset（tile 单位）
@@ -53,12 +65,30 @@ namespace MightyTerrainMesh
         [ReadOnly] public NativeArray<Color32> layerPix5;
         [ReadOnly] public NativeArray<Color32> layerPix6;
         [ReadOnly] public NativeArray<Color32> layerPix7;
+        [ReadOnly] public NativeArray<Color32> normalPix4;
+        [ReadOnly] public NativeArray<Color32> normalPix5;
+        [ReadOnly] public NativeArray<Color32> normalPix6;
+        [ReadOnly] public NativeArray<Color32> normalPix7;
+        [ReadOnly] public NativeArray<Color32> maskPix4;
+        [ReadOnly] public NativeArray<Color32> maskPix5;
+        [ReadOnly] public NativeArray<Color32> maskPix6;
+        [ReadOnly] public NativeArray<Color32> maskPix7;
         public int4 layerSizeB;
         public int4 layerSizeHB;
+        public int4 normalSizeB;
+        public int4 normalSizeHB;
+        public int4 maskSizeB;
+        public int4 maskSizeHB;
         public float4 tileSizeXB;
         public float4 tileSizeYB;
         public float4 tileOffXB;
         public float4 tileOffYB;
+        public float4 normalScale;
+        public float4 normalScaleB;
+        public float4 layerMetallic;
+        public float4 layerMetallicB;
+        public float4 layerSmoothness;
+        public float4 layerSmoothnessB;
         [ReadOnly] public NativeArray<float> heights;     // 归一化 [0,1]，y*res+x
         public int heightRes;
 
@@ -135,42 +165,75 @@ namespace MightyTerrainMesh
 
         float4 SplatAlbedo(float2 w)
         {
-            float u = math.saturate((w.x - terrainPos.x) / terrainDataSize.x);
-            float v = math.saturate((w.y - terrainPos.z) / terrainDataSize.z);
-            int ax = math.min(alphaRes - 1, (int)(u * alphaRes));
-            int ay = math.min(alphaRes - 1, (int)(v * alphaRes));
-            int aBase = (ay * alphaRes + ax) * alphaLayers;
-
-            float4 c = float4.zero;
+            int aBase = AlphaBase(w);
+            float3 rgb = float3.zero;
+            float metallic = 0;
             for (int l = 0; l < 8 && l < alphaLayers; ++l)
             {
                 float weight = alphamaps[aBase + l];
                 if (weight < 0.003f) continue;
-                c += LayerColor(l, w) * weight;
+                float4 diffuse = LayerTexel(l, w, 0, new float4(0.5f, 0.5f, 0.5f, 1f));
+                float4 mask = LayerTexel(l, w, 2, new float4(LayerMetallic(l), 1f, 0f, 0f));
+                rgb += diffuse.xyz * weight;
+                metallic += mask.x * weight;
             }
-            c.w = 1f; // albedo.A 无语义（§4.1；D14 splat 完全烘焙，运行时不做细节调制）
-            return c;
+            return new float4(rgb, metallic);
         }
 
-        float4 LayerColor(int l, float2 w)
+        int AlphaBase(float2 w)
+        {
+            float u = math.saturate((w.x - terrainPos.x) / terrainDataSize.x);
+            float v = math.saturate((w.y - terrainPos.z) / terrainDataSize.z);
+            int ax = math.min(alphaRes - 1, (int)(u * alphaRes));
+            int ay = math.min(alphaRes - 1, (int)(v * alphaRes));
+            return (ay * alphaRes + ax) * alphaLayers;
+        }
+
+        float4 LayerTexel(int l, float2 w, int kind, float4 fallback)
         {
             NativeArray<Color32> px;
             int lw, lh;
             float tx, ty, ox, oy;
             if (l < 4)
             {
-                px = l == 0 ? layerPix0 : l == 1 ? layerPix1 : l == 2 ? layerPix2 : layerPix3;
-                lw = layerSize[l]; lh = layerSizeH[l];
+                if (kind == 0)
+                {
+                    px = l == 0 ? layerPix0 : l == 1 ? layerPix1 : l == 2 ? layerPix2 : layerPix3;
+                    lw = layerSize[l]; lh = layerSizeH[l];
+                }
+                else if (kind == 1)
+                {
+                    px = l == 0 ? normalPix0 : l == 1 ? normalPix1 : l == 2 ? normalPix2 : normalPix3;
+                    lw = normalSize[l]; lh = normalSizeH[l];
+                }
+                else
+                {
+                    px = l == 0 ? maskPix0 : l == 1 ? maskPix1 : l == 2 ? maskPix2 : maskPix3;
+                    lw = maskSize[l]; lh = maskSizeH[l];
+                }
                 tx = tileSizeX[l]; ty = tileSizeY[l]; ox = tileOffX[l]; oy = tileOffY[l];
             }
             else
             {
                 int l4 = l - 4;
-                px = l4 == 0 ? layerPix4 : l4 == 1 ? layerPix5 : l4 == 2 ? layerPix6 : layerPix7;
-                lw = layerSizeB[l4]; lh = layerSizeHB[l4];
+                if (kind == 0)
+                {
+                    px = l4 == 0 ? layerPix4 : l4 == 1 ? layerPix5 : l4 == 2 ? layerPix6 : layerPix7;
+                    lw = layerSizeB[l4]; lh = layerSizeHB[l4];
+                }
+                else if (kind == 1)
+                {
+                    px = l4 == 0 ? normalPix4 : l4 == 1 ? normalPix5 : l4 == 2 ? normalPix6 : normalPix7;
+                    lw = normalSizeB[l4]; lh = normalSizeHB[l4];
+                }
+                else
+                {
+                    px = l4 == 0 ? maskPix4 : l4 == 1 ? maskPix5 : l4 == 2 ? maskPix6 : maskPix7;
+                    lw = maskSizeB[l4]; lh = maskSizeHB[l4];
+                }
                 tx = tileSizeXB[l4]; ty = tileSizeYB[l4]; ox = tileOffXB[l4]; oy = tileOffYB[l4];
             }
-            if (lw <= 0 || px.Length == 0) return new float4(0.5f, 0.5f, 0.5f, 1f); // 无纹理回退灰
+            if (lw <= 0 || lh <= 0 || px.Length == 0) return fallback;
             // Unity 地形层平铺以地形原点为基准：uv = (worldXZ - terrainPosXZ) / tileSize + tileOffset
             float rx = w.x - terrainPos.x;
             float ry = w.y - terrainPos.z;
@@ -180,6 +243,10 @@ namespace MightyTerrainMesh
             int ly = math.min(lh - 1, (int)(lv * lh));
             return ToFloat4(px[ly * lw + lx]);
         }
+
+        float LayerNormalScale(int l) => l < 4 ? normalScale[l] : normalScaleB[l - 4];
+        float LayerMetallic(int l) => l < 4 ? layerMetallic[l] : layerMetallicB[l - 4];
+        float LayerSmoothness(int l) => l < 4 ? layerSmoothness[l] : layerSmoothnessB[l - 4];
 
         float4 BakedAlbedo(float2 w)
         {
@@ -216,27 +283,51 @@ namespace MightyTerrainMesh
 
         // ---------------- NormalAttr ----------------
         // §4.1 通道契约：RG = 法线 XY（TS，x→worldX，y→worldZ），B = 粗糙度，A = AO
-        // （粗糙度/AO 当前烘焙为常量 0.85/1.0，占位以便未来接入逐 texel 数据）
 
         float4 SampleNormalAttr(float2 w)
         {
             switch (mode)
             {
-                case MODE_TERRAIN: return HeightNormalAttr(w);
+                case MODE_TERRAIN: return SplatNormalAttr(w);
                 case MODE_BAKED: return BakedNormalAttr(w);
                 default: return new float4(0.5f, 0.5f, 0.85f, 1f);
             }
         }
 
-        float4 HeightNormalAttr(float2 w)
+        float4 SplatNormalAttr(float2 w)
         {
             float e = terrainDataSize.x / (heightRes - 1);
             float hL = HeightAt(w + new float2(-e, 0));
             float hR = HeightAt(w + new float2(e, 0));
             float hD = HeightAt(w + new float2(0, -e));
             float hU = HeightAt(w + new float2(0, e));
-            float3 n = math.normalize(new float3(hL - hR, 2f * e, hD - hU));
-            return new float4(n.x * 0.5f + 0.5f, n.z * 0.5f + 0.5f, 0.85f, 1f);
+            float3 heightNormal = math.normalize(new float3(hL - hR, hD - hU, 2f * e));
+
+            int aBase = AlphaBase(w);
+            float3 detailNormal = float3.zero;
+            float smoothness = 0, occlusion = 0;
+            for (int l = 0; l < 8 && l < alphaLayers; ++l)
+            {
+                float weight = alphamaps[aBase + l];
+                if (weight < 0.003f) continue;
+                float4 packedNormal = LayerTexel(l, w, 1, new float4(0.5f, 0.5f, 1f, 1f));
+                float2 xy = (packedNormal.xy * 2f - 1f) * LayerNormalScale(l);
+                float z = math.sqrt(math.saturate(1f - math.dot(xy, xy)));
+                detailNormal += new float3(xy, z) * weight;
+
+                float4 diffuse = LayerTexel(l, w, 0, new float4(0.5f, 0.5f, 0.5f, 1f));
+                float defaultSmoothness = diffuse.w * LayerSmoothness(l);
+                float4 mask = LayerTexel(l, w, 2, new float4(LayerMetallic(l), 1f, 0f, defaultSmoothness));
+                smoothness += mask.w * weight;
+                occlusion += mask.y * weight;
+            }
+            detailNormal.z += 1e-5f;
+            detailNormal = math.normalize(detailNormal);
+            float3 combined = math.normalize(new float3(
+                heightNormal.xy + detailNormal.xy,
+                heightNormal.z * detailNormal.z));
+            return new float4(combined.x * 0.5f + 0.5f, combined.y * 0.5f + 0.5f,
+                1f - smoothness, occlusion);
         }
 
         float HeightAt(float2 w)

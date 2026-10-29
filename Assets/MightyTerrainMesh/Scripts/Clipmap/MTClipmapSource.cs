@@ -12,11 +12,13 @@ namespace MightyTerrainMesh
     /// 文件布局（Resources/&lt;root&gt;/ 下）：
     ///   manifest.json / l7_albedo.bytes / l7_normal.bytes / l8_albedo.bytes / l8_normal.bytes
     ///   block_{i}_albedo.bytes / block_{i}_normal.bytes
-    /// 纹理 .bytes 头：int32 width, height, textureFormat, 后接 GetRawTextureData 字节流。
+    /// 纹理 .bytes 仅含 GetRawTextureData 字节流；尺寸由各级分辨率字段提供，格式由 texFormat/texFormatN 提供。
     /// </summary>
     [Serializable]
     public class ClipmapManifest
     {
+        public const int CurrentTextureDataVersion = 2;
+        public int textureDataVersion;
         public float originX;
         public float originZ;
         public float terrainSize;
@@ -30,9 +32,11 @@ namespace MightyTerrainMesh
         public int tileRes;
         public float tileWorld0;
         public int tileLevels;
-        // 烘焙 albedo 目标格式（TextureFormat 枚举值：ASTC_6x6 / BC7 / RGBA32，normal 依 §10 规则配对）。
-        // 0 = 旧数据（按 ASTC_6x6 假设，不匹配时加载报错提示重烘）。
+        // albedo / normal 的 TextureFormat 枚举值（ASTC 6x6/5x5、BC7/BC7 或 RGBA32/RGBA32）。
         public int texFormat;
+        public int texFormatN;
+        // 1 = Albedo.A 为 Metallic，Normal.B/A 为 Roughness/AO；0 = 旧数据 Albedo.A 无材质语义。
+        public int materialChannels;
         // 细节层通道（已废弃，D14：splat 完全烘焙，运行时无 detail overlay；NormalAttr B/A 依 §4.1 为粗糙度/AO）。
         // 字段保留仅为反序列化兼容旧 manifest；运行时不再读取。
         public int detailLayers;
@@ -48,16 +52,24 @@ namespace MightyTerrainMesh
         public const int MaxBlocks = 64;
 
         public int Mode { get; private set; }
+        public bool PackedMaterial { get; private set; }
 
         // Terrain 模式数据
         private NativeArray<float> _alphamaps;
         private NativeArray<Color32> _layerPix0, _layerPix1, _layerPix2, _layerPix3;
         private NativeArray<Color32> _layerPix4, _layerPix5, _layerPix6, _layerPix7;
+        private NativeArray<Color32> _normalPix0, _normalPix1, _normalPix2, _normalPix3;
+        private NativeArray<Color32> _normalPix4, _normalPix5, _normalPix6, _normalPix7;
+        private NativeArray<Color32> _maskPix0, _maskPix1, _maskPix2, _maskPix3;
+        private NativeArray<Color32> _maskPix4, _maskPix5, _maskPix6, _maskPix7;
         private NativeArray<float> _heights;
         private int _alphaRes, _alphaLayers, _heightRes;
         private int4 _layerW, _layerH, _layerWB, _layerHB;
+        private int4 _normalW, _normalH, _normalWB, _normalHB;
+        private int4 _maskW, _maskH, _maskWB, _maskHB;
         private float4 _tileX, _tileY, _tileXB, _tileYB;
         private float4 _tileOffX, _tileOffY, _tileOffXB, _tileOffYB;
+        private float4 _normalScale, _normalScaleB, _metallic, _metallicB, _smoothness, _smoothnessB;
         private Vector3 _terrainPos, _terrainSize3;
 
         // Baked 模式数据
@@ -69,16 +81,17 @@ namespace MightyTerrainMesh
         private float _bakedSize;
 
         // 瓦片金字塔流式缓存（Baked 模式可选）——瓦片以 GPU 纹理驻留，
-        // 加载不解码（ASTC 平台保持压缩），更新 = Graphics.CopyTexture 矩形直拷，CPU 只做簿记。
+        // 加载不解码，更新 = Graphics.CopyTexture 矩形直拷，CPU 只做簿记。
         private bool _hasPyramid;
         private string _bakedRoot;
         private int _tileRes;
         private float _tileWorld0;
         private int _tileLevels;
-        private int _tileBudget = 64;   // 驻留上限（对，albedo+normal 各 tileRes²）
-        private int _residentTiles;
+        private const int MaxInFlightTiles = 4;
+        private int _tileBudget = 64;   // 驻留、排队和在途条目的总预算（对）
         private readonly Dictionary<long, TileEntry> _tiles = new Dictionary<long, TileEntry>();
         private readonly List<TileEntry> _loading = new List<TileEntry>();
+        private readonly Queue<TileEntry> _pendingLoads = new Queue<TileEntry>();
 
         private class TileEntry
         {
@@ -86,49 +99,26 @@ namespace MightyTerrainMesh
             public Texture2D texA, texN;            // 非 null = 已驻留（格式 = 环面目标格式）
             public ResourceRequest reqA, reqN;
             public int lastUsedFrame;
+            public bool requested;      // 已排队或在途，防止重复请求
             public bool failed;
             public int failCount;       // 连续失败次数（退避重试用）
             public int nextRetryFrame;  // 允许重新发起加载的最早帧
         }
 
-        /// <summary>ASTC 硬件能力（决定环面与瓦片目标格式：ASTC 直拷 / RGBA32 解码回退）。</summary>
-        public static bool AstcSupported { get; } = DetectAstc();
-
-        /// <summary>BC7 硬件能力（DX/桌面，D12）。</summary>
-        public static bool Bc7Supported { get; } = DetectBc7();
-
-        /// <summary>瓦片期望目标格式（由 Controller 按环面格式设置；不一致的烘焙数据将判失败）。
-        /// RGBA32 = 解码回退（瓦片任意格式加载时 CPU 解码）。</summary>
         public TextureFormat TileFormatA { get; set; } = TextureFormat.RGBA32;
         public TextureFormat TileFormatN { get; set; } = TextureFormat.RGBA32;
 
-        /// <summary>烘焙清单声明的 albedo 格式（未声明的旧数据按 ASTC_6x6 假设）。</summary>
-        public TextureFormat BakedTexFormatA { get; private set; } = TextureFormat.ASTC_6x6;
+        public TextureFormat BakedTexFormatA { get; private set; } = TextureFormat.RGBA32;
+        public TextureFormat BakedTexFormatN { get; private set; } = TextureFormat.RGBA32;
 
         /// <summary>瓦片驻留预算（对）。超出后 LRU 淘汰最久未用瓦片。</summary>
         public int TileBudget { get => _tileBudget; set => _tileBudget = Mathf.Max(8, value); }
 
         public bool HasPyramid => _hasPyramid;
         public int TileRes => _tileRes;
+        public int L8Res => _l8Res;
         public float TileWorld0 => _tileWorld0;
         public int Levels => _tileLevels;
-
-        private static bool DetectAstc()
-        {
-            return SystemInfo.IsFormatSupported(
-                       UnityEngine.Experimental.Rendering.GraphicsFormat.RGBA_ASTC6X6_SRGB,
-                       UnityEngine.Experimental.Rendering.FormatUsage.Sample)
-                && SystemInfo.IsFormatSupported(
-                       UnityEngine.Experimental.Rendering.GraphicsFormat.RGBA_ASTC5X5_UNorm,
-                       UnityEngine.Experimental.Rendering.FormatUsage.Sample);
-        }
-
-        private static bool DetectBc7()
-        {
-            return SystemInfo.IsFormatSupported(
-                UnityEngine.Experimental.Rendering.GraphicsFormat.RGBA_BC7_SRGB,
-                UnityEngine.Experimental.Rendering.FormatUsage.Sample);
-        }
 
         public Vector2 BakedOrigin => _bakedOrigin;
         public float BakedSize => _bakedSize;
@@ -147,6 +137,22 @@ namespace MightyTerrainMesh
             _layerPix5 = new NativeArray<Color32>(0, Allocator.Persistent);
             _layerPix6 = new NativeArray<Color32>(0, Allocator.Persistent);
             _layerPix7 = new NativeArray<Color32>(0, Allocator.Persistent);
+            _normalPix0 = new NativeArray<Color32>(0, Allocator.Persistent);
+            _normalPix1 = new NativeArray<Color32>(0, Allocator.Persistent);
+            _normalPix2 = new NativeArray<Color32>(0, Allocator.Persistent);
+            _normalPix3 = new NativeArray<Color32>(0, Allocator.Persistent);
+            _normalPix4 = new NativeArray<Color32>(0, Allocator.Persistent);
+            _normalPix5 = new NativeArray<Color32>(0, Allocator.Persistent);
+            _normalPix6 = new NativeArray<Color32>(0, Allocator.Persistent);
+            _normalPix7 = new NativeArray<Color32>(0, Allocator.Persistent);
+            _maskPix0 = new NativeArray<Color32>(0, Allocator.Persistent);
+            _maskPix1 = new NativeArray<Color32>(0, Allocator.Persistent);
+            _maskPix2 = new NativeArray<Color32>(0, Allocator.Persistent);
+            _maskPix3 = new NativeArray<Color32>(0, Allocator.Persistent);
+            _maskPix4 = new NativeArray<Color32>(0, Allocator.Persistent);
+            _maskPix5 = new NativeArray<Color32>(0, Allocator.Persistent);
+            _maskPix6 = new NativeArray<Color32>(0, Allocator.Persistent);
+            _maskPix7 = new NativeArray<Color32>(0, Allocator.Persistent);
             _l7A = new NativeArray<Color32>(0, Allocator.Persistent);
             _l7N = new NativeArray<Color32>(0, Allocator.Persistent);
             _l8A = new NativeArray<Color32>(0, Allocator.Persistent);
@@ -160,7 +166,7 @@ namespace MightyTerrainMesh
 
         public static ClipmapSourceRuntime FromTerrain(Terrain t)
         {
-            var s = new ClipmapSourceRuntime { Mode = ClipmapStripJob.MODE_TERRAIN };
+            var s = new ClipmapSourceRuntime { Mode = ClipmapStripJob.MODE_TERRAIN, PackedMaterial = true };
             var td = t.terrainData;
             s._terrainPos = t.transform.position;
             s._terrainSize3 = td.size;
@@ -185,13 +191,19 @@ namespace MightyTerrainMesh
             for (int l = 0; l < 8; ++l)
             {
                 NativeArray<Color32> px = new NativeArray<Color32>(0, Allocator.Persistent);
-                int w = 0, h = 0;
+                NativeArray<Color32> np = new NativeArray<Color32>(0, Allocator.Persistent);
+                NativeArray<Color32> mp = new NativeArray<Color32>(0, Allocator.Persistent);
+                int w = 0, h = 0, nw = 0, nh = 0, mw = 0, mh = 0;
                 float tx = 1, ty = 1, ox = 0, oy = 0;
+                float normalScale = 1, metallic = 0, smoothness = 0.5f;
                 if (l < td.terrainLayers.Length)
                 {
                     var layer = td.terrainLayers[l];
                     tx = layer.tileSize.x; ty = layer.tileSize.y;
                     ox = layer.tileOffset.x; oy = layer.tileOffset.y;
+                    normalScale = layer.normalScale;
+                    metallic = layer.metallic;
+                    smoothness = layer.smoothness;
                     if (layer.diffuseTexture == null)
                     {
                         Debug.LogWarning($"[ClipmapSource] 地形层 {l} ({layer.name}) 无 diffuse 纹理，烘焙回退为灰色");
@@ -199,34 +211,53 @@ namespace MightyTerrainMesh
                     else
                     {
                         // 非可读纹理经 RenderTexture 中转读回（GPU Blit，无需修改导入设置）
-                        var src = GetPixels32Any(layer.diffuseTexture);
-                        px = new NativeArray<Color32>(src, Allocator.Persistent);
+                        px = GetPixels32Any(layer.diffuseTexture);
                         w = layer.diffuseTexture.width; h = layer.diffuseTexture.height;
+                    }
+                    if (layer.normalMapTexture != null)
+                    {
+                        np = GetNormalPixels32Any(layer.normalMapTexture);
+                        nw = layer.normalMapTexture.width; nh = layer.normalMapTexture.height;
+                    }
+                    if (layer.maskMapTexture != null)
+                    {
+                        mp = GetPixels32Any(layer.maskMapTexture);
+                        mw = layer.maskMapTexture.width; mh = layer.maskMapTexture.height;
                     }
                 }
                 switch (l)
                 {
-                    case 0: s._layerPix0 = px; break;
-                    case 1: s._layerPix1 = px; break;
-                    case 2: s._layerPix2 = px; break;
-                    case 3: s._layerPix3 = px; break;
-                    case 4: s._layerPix4 = px; break;
-                    case 5: s._layerPix5 = px; break;
-                    case 6: s._layerPix6 = px; break;
-                    default: s._layerPix7 = px; break;
+                    case 0: s._layerPix0 = px; s._normalPix0 = np; s._maskPix0 = mp; break;
+                    case 1: s._layerPix1 = px; s._normalPix1 = np; s._maskPix1 = mp; break;
+                    case 2: s._layerPix2 = px; s._normalPix2 = np; s._maskPix2 = mp; break;
+                    case 3: s._layerPix3 = px; s._normalPix3 = np; s._maskPix3 = mp; break;
+                    case 4: s._layerPix4 = px; s._normalPix4 = np; s._maskPix4 = mp; break;
+                    case 5: s._layerPix5 = px; s._normalPix5 = np; s._maskPix5 = mp; break;
+                    case 6: s._layerPix6 = px; s._normalPix6 = np; s._maskPix6 = mp; break;
+                    default: s._layerPix7 = px; s._normalPix7 = np; s._maskPix7 = mp; break;
                 }
                 if (l < 4)
                 {
                     s._layerW[l] = w; s._layerH[l] = h;
+                    s._normalW[l] = nw; s._normalH[l] = nh;
+                    s._maskW[l] = mw; s._maskH[l] = mh;
                     s._tileX[l] = tx; s._tileY[l] = ty;
                     s._tileOffX[l] = ox; s._tileOffY[l] = oy;
+                    s._normalScale[l] = normalScale;
+                    s._metallic[l] = metallic;
+                    s._smoothness[l] = smoothness;
                 }
                 else
                 {
                     int l4 = l - 4;
                     s._layerWB[l4] = w; s._layerHB[l4] = h;
+                    s._normalWB[l4] = nw; s._normalHB[l4] = nh;
+                    s._maskWB[l4] = mw; s._maskHB[l4] = mh;
                     s._tileXB[l4] = tx; s._tileYB[l4] = ty;
                     s._tileOffXB[l4] = ox; s._tileOffYB[l4] = oy;
+                    s._normalScaleB[l4] = normalScale;
+                    s._metallicB[l4] = metallic;
+                    s._smoothnessB[l4] = smoothness;
                 }
             }
             if (td.alphamapLayers > 8)
@@ -235,12 +266,17 @@ namespace MightyTerrainMesh
         }
 
         /// <summary>
-        /// 读取纹理像素。纹理未开 Read/Write 时经 RenderTexture 中转读回（GPU Blit 采样 +
-        /// ReadPixels，编辑器/运行时均可用），sRGB 标志与源纹理一致以保证字节值不变。
+        /// 读取纹理像素到 Persistent NativeArray。RGBA32 直接复制原生像素；压缩格式保留必要解码。
+        /// 非可读纹理由 RenderTexture 中转，sRGB 标志与源纹理一致以保证字节值不变。
         /// </summary>
-        private static Color32[] GetPixels32Any(Texture2D tex)
+        private static NativeArray<Color32> GetPixels32Any(Texture2D tex)
         {
-            if (tex.isReadable) return tex.GetPixels32();
+            if (tex.isReadable)
+            {
+                if (tex.format == TextureFormat.RGBA32)
+                    return new NativeArray<Color32>(tex.GetPixelData<Color32>(0), Allocator.Persistent);
+                return new NativeArray<Color32>(tex.GetPixels32(), Allocator.Persistent);
+            }
             bool srgb = UnityEngine.Experimental.Rendering.GraphicsFormatUtility.IsSRGBFormat(tex.graphicsFormat);
             var rt = RenderTexture.GetTemporary(tex.width, tex.height, 0, RenderTextureFormat.ARGB32,
                 srgb ? RenderTextureReadWrite.sRGB : RenderTextureReadWrite.Linear);
@@ -252,10 +288,26 @@ namespace MightyTerrainMesh
             tmp.Apply(false);
             RenderTexture.active = prev;
             RenderTexture.ReleaseTemporary(rt);
-            var px = tmp.GetPixels32();
+            var px = new NativeArray<Color32>(tmp.GetPixelData<Color32>(0), Allocator.Persistent);
             // 编辑模式（烘焙）只能 DestroyImmediate；运行时（Terrain 模式）用 Destroy
             if (Application.isPlaying) UnityEngine.Object.Destroy(tmp);
             else UnityEngine.Object.DestroyImmediate(tmp);
+            return px;
+        }
+
+        private static NativeArray<Color32> GetNormalPixels32Any(Texture2D tex)
+        {
+            var px = GetPixels32Any(tex);
+            var format = tex.graphicsFormat;
+            if (format == UnityEngine.Experimental.Rendering.GraphicsFormat.RGBA_DXT5_UNorm ||
+                format == UnityEngine.Experimental.Rendering.GraphicsFormat.RGBA_DXT5_SRGB)
+            {
+                for (int i = 0; i < px.Length; ++i)
+                {
+                    var c = px[i];
+                    px[i] = new Color32(c.a, c.g, 255, 255);
+                }
+            }
             return px;
         }
 
@@ -266,15 +318,22 @@ namespace MightyTerrainMesh
             var manifestAsset = Resources.Load<TextAsset>(resourcesRoot + "/manifest");
             if (manifestAsset == null) return null;
             var m = JsonUtility.FromJson<ClipmapManifest>(manifestAsset.text);
+            if (m == null) return null;
+            if (m.textureDataVersion != ClipmapManifest.CurrentTextureDataVersion)
+            {
+                Debug.LogError($"[ClipmapSource] 纹理数据版本 {m.textureDataVersion} 与所需 {ClipmapManifest.CurrentTextureDataVersion} 不一致，请重新烘焙纯 raw 数据");
+                return null;
+            }
 
-            var s = new ClipmapSourceRuntime { Mode = ClipmapStripJob.MODE_BAKED };
+            var s = new ClipmapSourceRuntime { Mode = ClipmapStripJob.MODE_BAKED, PackedMaterial = m.materialChannels >= 1 };
             s._bakedOrigin = new Vector2(m.originX, m.originZ);
             s._bakedSize = m.terrainSize;
             s._l7Res = m.l7Res; s._l8Res = m.l8Res; s._blockRes = m.blockRes;
             s._bakedRoot = resourcesRoot;
             s._tileRes = m.tileRes; s._tileWorld0 = m.tileWorld0; s._tileLevels = m.tileLevels;
             s._hasPyramid = m.tileLevels > 0 && m.tileRes > 0;
-            if (m.texFormat != 0) s.BakedTexFormatA = (TextureFormat)m.texFormat;
+            s.BakedTexFormatA = (TextureFormat)m.texFormat;
+            s.BakedTexFormatN = (TextureFormat)m.texFormatN;
 
             if (s._hasPyramid)
             {
@@ -290,8 +349,8 @@ namespace MightyTerrainMesh
                 return s;
             }
 
-            s._l7A = LoadTexPixels(resourcesRoot + "/l7_albedo", true);
-            s._l7N = LoadTexPixels(resourcesRoot + "/l7_normal", false);
+            s._l7A = LoadTexPixels(resourcesRoot + "/l7_albedo", true, m.l7Res, s.BakedTexFormatA);
+            s._l7N = LoadTexPixels(resourcesRoot + "/l7_normal", false, m.l7Res, s.BakedTexFormatN);
             // L8 纹理由 Controller 直接加载使用（不经 Job）
             s._l8A = new NativeArray<Color32>(0, Allocator.Persistent);
             s._l8N = new NativeArray<Color32>(0, Allocator.Persistent);
@@ -305,8 +364,8 @@ namespace MightyTerrainMesh
             {
                 var r = m.blockRects[i];
                 s._blockRects[i] = new float4(r.x, r.y, r.width, r.height);
-                var pa = LoadTexPixels($"{resourcesRoot}/block_{i}_albedo", true);
-                var pn = LoadTexPixels($"{resourcesRoot}/block_{i}_normal", false);
+                var pa = LoadTexPixels($"{resourcesRoot}/block_{i}_albedo", true, m.blockRes, s.BakedTexFormatA);
+                var pn = LoadTexPixels($"{resourcesRoot}/block_{i}_normal", false, m.blockRes, s.BakedTexFormatN);
                 NativeArray<Color32>.Copy(pa, 0, s._blockA, i * m.blockRes * m.blockRes, pa.Length);
                 NativeArray<Color32>.Copy(pn, 0, s._blockN, i * m.blockRes * m.blockRes, pn.Length);
                 pa.Dispose(); pn.Dispose();
@@ -315,66 +374,26 @@ namespace MightyTerrainMesh
         }
 
         /// <summary>
-        /// 加载 .bytes 纹理为 Texture2D（供 L8 直接使用）。
-        /// 带 mipmaps 时 .bytes 必须已含离线生成的完整 Mip 链（§4.1：勿依赖运行时 glGenerateMipmap，
-        /// ASTC 压缩纹理运行时无法重建 mip），故 Apply(false) 仅上传不重建。
+        /// 按 manifest 提供的尺寸和格式加载纯 raw 纹理。带 mipmaps 时数据必须已含完整离线 Mip 链，
+        /// Apply(false) 仅上传，不在运行时重建压缩 Mip。
         /// </summary>
-        public static Texture2D LoadBakedTexture(string resourcesPath, bool sRGB, bool mipmaps)
+        public static Texture2D LoadBakedTexture(string resourcesPath, bool sRGB, bool mipmaps,
+            int width, int height, TextureFormat fmt)
         {
             var asset = Resources.Load<TextAsset>(resourcesPath);
             if (asset == null) return null;
-            var bytes = asset.bytes;
-            int w = BitConverter.ToInt32(bytes, 0);
-            int h = BitConverter.ToInt32(bytes, 4);
-            var fmt = (TextureFormat)BitConverter.ToInt32(bytes, 8);
-            var tex = new Texture2D(w, h, fmt, mipmaps, !sRGB);
-            var payload = new byte[bytes.Length - 12];
-            Buffer.BlockCopy(bytes, 12, payload, 0, payload.Length);
-            tex.LoadRawTextureData(payload);
+            var tex = new Texture2D(width, height, fmt, mipmaps, !sRGB);
+            LoadRawPayload(tex, asset.bytes);
             tex.Apply(false);
             tex.filterMode = mipmaps ? FilterMode.Trilinear : FilterMode.Bilinear;
             tex.wrapMode = TextureWrapMode.Clamp;
             return tex;
         }
 
-        /// <summary>
-        /// 加载 .bytes 纹理（静态层 L8 用）：文件格式当前平台可采样则直接加载；
-        /// 否则 CPU 软件解码 mip0 为 RGBA32 并按需重建 mip 链（ASTC 在不支持的平台由 Unity 软件解压）。
-        /// 与环面/瓦片的格式协商策略一致，避免压缩烘焙数据在不支持的平台上静态层加载失败。
-        /// </summary>
-        public static Texture2D LoadBakedTextureChecked(string resourcesPath, bool sRGB, bool mipmaps)
+        /// <summary>加载纯 raw 纹理并取出 CPU 像素，供无金字塔时的 Job 采样使用。</summary>
+        private static NativeArray<Color32> LoadTexPixels(string resourcesPath, bool sRGB, int res, TextureFormat fmt)
         {
-            var asset = Resources.Load<TextAsset>(resourcesPath);
-            if (asset == null) return null;
-            var bytes = asset.bytes;
-            if (bytes == null || bytes.Length < 12) return null;
-            int w = BitConverter.ToInt32(bytes, 0);
-            int h = BitConverter.ToInt32(bytes, 4);
-            var fmt = (TextureFormat)BitConverter.ToInt32(bytes, 8);
-            var gf = UnityEngine.Experimental.Rendering.GraphicsFormatUtility.GetGraphicsFormat(fmt, sRGB);
-            if (SystemInfo.IsFormatSupported(gf, UnityEngine.Experimental.Rendering.FormatUsage.Sample))
-                return LoadBakedTexture(resourcesPath, sRGB, mipmaps);
-
-            // 平台不支持该压缩格式：解码 mip0 → RGBA32（mip 链运行时重建）
-            var payload = new byte[bytes.Length - 12];
-            Buffer.BlockCopy(bytes, 12, payload, 0, payload.Length);
-            var tmp = new Texture2D(w, h, fmt, false, !sRGB);
-            tmp.LoadRawTextureData(payload);
-            tmp.Apply(false);
-            var px = tmp.GetPixels32();
-            UnityEngine.Object.Destroy(tmp);
-            var tex = new Texture2D(w, h, TextureFormat.RGBA32, mipmaps, !sRGB);
-            tex.SetPixels32(px);
-            tex.Apply(mipmaps);
-            tex.filterMode = mipmaps ? FilterMode.Trilinear : FilterMode.Bilinear;
-            tex.wrapMode = TextureWrapMode.Clamp;
-            return tex;
-        }
-
-        /// <summary>加载 .bytes 纹理并取出 CPU 像素（ASTC 在不支持的平台由 Unity 软件解压）。</summary>
-        private static NativeArray<Color32> LoadTexPixels(string resourcesPath, bool sRGB)
-        {
-            var tex = LoadBakedTexture(resourcesPath, sRGB, false);
+            var tex = LoadBakedTexture(resourcesPath, sRGB, false, res, res, fmt);
             if (tex == null) return new NativeArray<Color32>(0, Allocator.Persistent);
             var px = tex.GetPixels32();
             var arr = new NativeArray<Color32>(px, Allocator.Persistent);
@@ -417,7 +436,7 @@ namespace MightyTerrainMesh
             return false;
         }
 
-        /// <summary>每帧轮询异步瓦片加载（由 MTClipmapController.Update 驱动）。</summary>
+        /// <summary>每帧最多完成一对纹理，并补足在途请求，限制上传尖峰和 IO 并发。</summary>
         public void Update()
         {
             for (int i = _loading.Count - 1; i >= 0; --i)
@@ -426,7 +445,9 @@ namespace MightyTerrainMesh
                 if (!e.reqA.isDone || !e.reqN.isDone) continue;
                 _loading.RemoveAt(i);
                 FinishLoadTile(e);
+                break;
             }
+            PumpTileRequests();
         }
 
         private static long TileKey(int level, int tx, int tz)
@@ -438,23 +459,36 @@ namespace MightyTerrainMesh
             if (_tiles.TryGetValue(key, out var e))
             {
                 if (e.texA != null) e.lastUsedFrame = Time.frameCount;
-                else if (e.failed && Time.frameCount >= e.nextRetryFrame) IssueTileRequest(e); // 失败后退避重试
+                else if (e.failed && !e.requested && Time.frameCount >= e.nextRetryFrame) QueueTileRequest(e);
                 return e;
             }
-            if (_residentTiles >= _tileBudget) EvictLRU();
+            if (_tiles.Count >= _tileBudget) EvictLRU();
             e = new TileEntry { level = level, tx = tx, tz = tz };
             _tiles.Add(key, e);
-            IssueTileRequest(e);
+            QueueTileRequest(e);
             return e;
         }
 
-        private void IssueTileRequest(TileEntry e)
+        private void QueueTileRequest(TileEntry e)
         {
+            if (e.requested || e.texA != null) return;
             e.failed = false;
-            string basePath = $"{_bakedRoot}/tiles/l{e.level}_{e.tx}_{e.tz}";
-            e.reqA = Resources.LoadAsync<TextAsset>(basePath + "_albedo");
-            e.reqN = Resources.LoadAsync<TextAsset>(basePath + "_normal");
-            _loading.Add(e);
+            e.requested = true;
+            _pendingLoads.Enqueue(e);
+            PumpTileRequests();
+        }
+
+        private void PumpTileRequests()
+        {
+            while (_loading.Count < MaxInFlightTiles && _pendingLoads.Count > 0)
+            {
+                var e = _pendingLoads.Dequeue();
+                if (e.texA != null) { e.requested = false; continue; }
+                string basePath = $"{_bakedRoot}/tiles/l{e.level}_{e.tx}_{e.tz}";
+                e.reqA = Resources.LoadAsync<TextAsset>(basePath + "_albedo");
+                e.reqN = Resources.LoadAsync<TextAsset>(basePath + "_normal");
+                _loading.Add(e);
+            }
         }
 
         private void FinishLoadTile(TileEntry e)
@@ -462,21 +496,27 @@ namespace MightyTerrainMesh
             var ta = e.reqA.asset as TextAsset;
             var tn = e.reqN.asset as TextAsset;
             e.reqA = null; e.reqN = null;
-            if (ta == null || tn == null) { MarkLoadFailed(e); return; }
-            e.texA = CreateTileTexture(ta.bytes, true, TileFormatA);
-            e.texN = CreateTileTexture(tn.bytes, false, TileFormatN);
-            Resources.UnloadAsset(ta);
-            Resources.UnloadAsset(tn);
-            if (e.texA == null || e.texN == null)
+            e.requested = false;
+            try
             {
-                if (e.texA != null) { UnityEngine.Object.Destroy(e.texA); e.texA = null; }
-                if (e.texN != null) { UnityEngine.Object.Destroy(e.texN); e.texN = null; }
-                MarkLoadFailed(e);
-                return;
+                if (ta == null || tn == null) { MarkLoadFailed(e); return; }
+                e.texA = CreateTileTexture(ta.bytes, true, TileFormatA);
+                e.texN = CreateTileTexture(tn.bytes, false, TileFormatN);
+                if (e.texA == null || e.texN == null)
+                {
+                    if (e.texA != null) { UnityEngine.Object.Destroy(e.texA); e.texA = null; }
+                    if (e.texN != null) { UnityEngine.Object.Destroy(e.texN); e.texN = null; }
+                    MarkLoadFailed(e);
+                    return;
+                }
+                e.failCount = 0;
+                e.lastUsedFrame = Time.frameCount;
             }
-            e.failCount = 0;
-            e.lastUsedFrame = Time.frameCount;
-            _residentTiles++;
+            finally
+            {
+                if (ta != null) Resources.UnloadAsset(ta);
+                if (tn != null) Resources.UnloadAsset(tn);
+            }
         }
 
         /// <summary>加载失败：线性退避后重试（1s 起、上限 10s），避免单文件缺失导致所属层永久失效。</summary>
@@ -490,43 +530,32 @@ namespace MightyTerrainMesh
                 Debug.LogWarning($"[ClipmapSource] 瓦片 l{e.level}_{e.tx}_{e.tz} 加载失败（第 {e.failCount} 次），{delayFrames / 60f:0}s 后重试");
         }
 
-        /// <summary>
-        /// 从 .bytes 创建瓦片纹理。expectFmt != RGBA32（ASTC/BC7）：保持压缩直接上传（零 CPU 解码），
-        /// 格式不符返回 null；expectFmt == RGBA32：任意格式 CPU 解码一次，与 RGBA32 环面格式兼容。
-        /// </summary>
+        /// <summary>按 manifest 的分辨率和格式从纯 raw 数据创建瓦片纹理，目标平台须支持所选格式。</summary>
         private Texture2D CreateTileTexture(byte[] bytes, bool sRGB, TextureFormat expectFmt)
         {
-            if (bytes == null || bytes.Length < 12) return null;
-            int w = BitConverter.ToInt32(bytes, 0);
-            int h = BitConverter.ToInt32(bytes, 4);
-            var fmt = (TextureFormat)BitConverter.ToInt32(bytes, 8);
-            var payload = new byte[bytes.Length - 12];
-            Buffer.BlockCopy(bytes, 12, payload, 0, payload.Length);
-            if (expectFmt != TextureFormat.RGBA32)
+            if (bytes == null || bytes.Length == 0) return null;
+            Texture2D t = null;
+            try
             {
-                if (fmt != expectFmt)
-                {
-                    Debug.LogError($"[ClipmapSource] 瓦片格式 {fmt} 与环面目标 {expectFmt} 不一致（请按目标平台重新烘焙）");
-                    return null;
-                }
-                var t = new Texture2D(w, h, fmt, false, !sRGB);
-                t.LoadRawTextureData(payload);
+                t = new Texture2D(_tileRes, _tileRes, expectFmt, false, !sRGB);
+                LoadRawPayload(t, bytes);
                 t.Apply(false);
                 t.wrapMode = TextureWrapMode.Clamp;
                 t.filterMode = FilterMode.Bilinear;
                 return t;
             }
-            var tmp = new Texture2D(w, h, fmt, false, !sRGB);
-            tmp.LoadRawTextureData(payload);
-            tmp.Apply(false);
-            if (fmt == TextureFormat.RGBA32) { tmp.wrapMode = TextureWrapMode.Clamp; return tmp; }
-            var px = tmp.GetPixels32(); // CPU 解码（ASTC/BC7 在不支持的平台由 Unity 软件解压）
-            UnityEngine.Object.Destroy(tmp);
-            var t2 = new Texture2D(w, h, TextureFormat.RGBA32, false, !sRGB);
-            t2.SetPixels32(px);
-            t2.Apply(false);
-            t2.wrapMode = TextureWrapMode.Clamp;
-            return t2;
+            catch (Exception e)
+            {
+                if (t != null) UnityEngine.Object.Destroy(t);
+                Debug.LogWarning($"[ClipmapSource] 瓦片纹理创建失败：{e.Message}");
+                return null;
+            }
+        }
+
+        private static unsafe void LoadRawPayload(Texture2D tex, byte[] bytes)
+        {
+            fixed (byte* data = bytes)
+                tex.LoadRawTextureData((IntPtr)data, bytes.Length);
         }
 
         /// <summary>淘汰最久未用的驻留瓦片（本帧在用或加载中的跳过；都在用则暂时超支）。</summary>
@@ -544,7 +573,6 @@ namespace MightyTerrainMesh
             UnityEngine.Object.Destroy(victim.texA);
             UnityEngine.Object.Destroy(victim.texN);
             _tiles.Remove(victimKey);
-            _residentTiles--;
         }
 
         // ---------------- Job 工厂 ----------------
@@ -571,14 +599,29 @@ namespace MightyTerrainMesh
                 alphaLayers = _alphaLayers,
                 layerPix0 = _layerPix0, layerPix1 = _layerPix1,
                 layerPix2 = _layerPix2, layerPix3 = _layerPix3,
+                normalPix0 = _normalPix0, normalPix1 = _normalPix1,
+                normalPix2 = _normalPix2, normalPix3 = _normalPix3,
+                maskPix0 = _maskPix0, maskPix1 = _maskPix1,
+                maskPix2 = _maskPix2, maskPix3 = _maskPix3,
                 layerSize = _layerW, layerSizeH = _layerH,
+                normalSize = _normalW, normalSizeH = _normalH,
+                maskSize = _maskW, maskSizeH = _maskH,
                 tileSizeX = _tileX, tileSizeY = _tileY,
                 tileOffX = _tileOffX, tileOffY = _tileOffY,
                 layerPix4 = _layerPix4, layerPix5 = _layerPix5,
                 layerPix6 = _layerPix6, layerPix7 = _layerPix7,
+                normalPix4 = _normalPix4, normalPix5 = _normalPix5,
+                normalPix6 = _normalPix6, normalPix7 = _normalPix7,
+                maskPix4 = _maskPix4, maskPix5 = _maskPix5,
+                maskPix6 = _maskPix6, maskPix7 = _maskPix7,
                 layerSizeB = _layerWB, layerSizeHB = _layerHB,
+                normalSizeB = _normalWB, normalSizeHB = _normalHB,
+                maskSizeB = _maskWB, maskSizeHB = _maskHB,
                 tileSizeXB = _tileXB, tileSizeYB = _tileYB,
                 tileOffXB = _tileOffXB, tileOffYB = _tileOffYB,
+                normalScale = _normalScale, normalScaleB = _normalScaleB,
+                layerMetallic = _metallic, layerMetallicB = _metallicB,
+                layerSmoothness = _smoothness, layerSmoothnessB = _smoothnessB,
                 heights = _heights,
                 heightRes = _heightRes,
                 // baked
@@ -610,6 +653,14 @@ namespace MightyTerrainMesh
             DisposeIf(ref _layerPix2); DisposeIf(ref _layerPix3);
             DisposeIf(ref _layerPix4); DisposeIf(ref _layerPix5);
             DisposeIf(ref _layerPix6); DisposeIf(ref _layerPix7);
+            DisposeIf(ref _normalPix0); DisposeIf(ref _normalPix1);
+            DisposeIf(ref _normalPix2); DisposeIf(ref _normalPix3);
+            DisposeIf(ref _normalPix4); DisposeIf(ref _normalPix5);
+            DisposeIf(ref _normalPix6); DisposeIf(ref _normalPix7);
+            DisposeIf(ref _maskPix0); DisposeIf(ref _maskPix1);
+            DisposeIf(ref _maskPix2); DisposeIf(ref _maskPix3);
+            DisposeIf(ref _maskPix4); DisposeIf(ref _maskPix5);
+            DisposeIf(ref _maskPix6); DisposeIf(ref _maskPix7);
             DisposeIf(ref _l7A); DisposeIf(ref _l7N); DisposeIf(ref _l8A); DisposeIf(ref _l8N);
             DisposeIf(ref _blockRects); DisposeIf(ref _blockA); DisposeIf(ref _blockN);
             foreach (var kv in _tiles)
@@ -619,6 +670,7 @@ namespace MightyTerrainMesh
             }
             _tiles.Clear();
             _loading.Clear();
+            _pendingLoads.Clear();
         }
 
         private static void DisposeIf<T>(ref NativeArray<T> arr) where T : struct

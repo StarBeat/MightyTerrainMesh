@@ -15,15 +15,15 @@ namespace MightyTerrainMesh
     /// - 固定图集寻址：采样 uv = frac(localXZ / footprint_k)，origin 仅作更新簿记；
     /// - 更新量子 Q：ASTC=30 / BC7=60（§5.1）；条带矩形由 Q 对齐性自动块对齐；
     /// - 直拷模式（Baked + 金字塔）：烘焙 texel ≡ 环面 texel（1:1），更新 = 纯矩形簿记 +
-    ///   Graphics.CopyTexture（ASTC/BC7 压缩直拷；无硬件支持时 RGBA32 解码回退），CPU 零逐像素工作；
-    /// - 环面格式三档（§10/D12）：ASTC 6x6/5x5（移动端）/ BC7（DX/桌面）/ RGBA32，由 manifest
-    ///   声明格式 + 平台能力决定；
+    ///   Graphics.CopyTexture（ASTC/BC7 压缩直拷），CPU 零逐像素工作；
+    /// - 环面格式三档（§10/D12）：ASTC 6x6/5x5（移动端）/ BC7（DX/桌面）/ RGBA32，
+    ///   直接使用 manifest 声明格式，目标平台须支持；
     /// - 瓦片未到位 → 不写入兜底内容，shader 按驻留掩码 _ClipValidMask 逐层向上扫描（§6.5，
     ///   支持非连续层失效；粗级全量烘焙保证收敛，静态层恒有效）；
     /// - 带宽门闸（§8.1）：帧时 EMA 持续超预算 → ① 混合带 25%→20%（_ClipBlendStart 0.75→0.80）
     ///   → ② 静态层 Aniso 2→1；
     /// - 通道契约（§4.1/D14）：splat 完全烘焙、运行时无 splat/detail 采样；
-    ///   NormalAttr B/A = 粗糙度/AO（当前烘焙常量 0.85/1.0）；
+    ///   Albedo.A = Metallic，NormalAttr B/A = 粗糙度/AO（旧 manifest 保持非金属）；
     /// - 上传字节预算（§8.2）：每帧 uploadBudgetBytes（默认 1MB）；整层重填按预算分横带
     ///   多帧完成（RGBA32 联调模式下单层 ≈33MB 不再单帧突发），期间采样端按掩码回退粗层；
     /// - Job 重采样路径保留：Terrain（实时 splat）/ Test 模式，及无金字塔的旧烘焙数据；
@@ -70,6 +70,12 @@ namespace MightyTerrainMesh
         [Tooltip("帧时 EMA 预算(ms)；连续超限触发降级：① 混合带 25%→20% ② 静态层 Aniso 2→1")]
         public float frameBudgetMs = 33f;
 
+        public enum DebugLodMode { Off, Requested, Actual }
+
+        [Header("调试")]
+        [Tooltip("按 viewCamera 的选层结果显示（像素足迹与距离取 max），不受 Scene 相机影响；Requested：请求 LOD；Actual：包含瓦片未驻留时的粗层回退")]
+        public DebugLodMode debugLodMode = DebugLodMode.Requested;
+
         private enum StripKind { Col, Row, Full }
 
         private struct StripOp
@@ -92,6 +98,7 @@ namespace MightyTerrainMesh
         private int[] _refillRow;        // 整层重填进度（已写入行数，Q 的倍数；0 = 未开始）
         private Vector2[] _refillOrigin; // 重填起始帧的吸附原点快照（分带跨帧期间相机可能继续移动）
         private ClipmapSourceRuntime _source;
+        private readonly List<StripOp> _ops = new List<StripOp>();
         private int _levelCount;        // K = log2(S)−5（§3.1.1），Awake 计算
         private bool _useCopy;          // 直拷模式：Baked + 金字塔（更新 = 矩形簿记 + CopyTexture）
         private TextureFormat _ringFmtA = TextureFormat.RGBA32, _ringFmtN = TextureFormat.RGBA32; // 环面格式（§10）
@@ -151,19 +158,11 @@ namespace MightyTerrainMesh
             _refillRow = new int[_levelCount];
             _refillOrigin = new Vector2[_levelCount];
 
-            // 环面格式三档（§10/D12）：manifest 声明格式 + 平台能力 → ASTC / BC7 / RGBA32（解码回退）
+            // 环面直接使用 manifest 格式；目标平台须支持所选 ASTC/BC7。
             if (_useCopy)
             {
-                var desired = _source.BakedTexFormatA;
-                if (desired == TextureFormat.ASTC_6x6 && ClipmapSourceRuntime.AstcSupported)
-                { _ringFmtA = TextureFormat.ASTC_6x6; _ringFmtN = TextureFormat.ASTC_5x5; }
-                else if (desired == TextureFormat.BC7 && ClipmapSourceRuntime.Bc7Supported)
-                { _ringFmtA = TextureFormat.BC7; _ringFmtN = TextureFormat.BC7; }
-                else if (desired == TextureFormat.BC7)
-                    // Unity 无 BC7 软件解码器：RGBA32 回退对 BC7 数据不可用（ASTC 有软件解码，BC7 没有）
-                    Debug.LogError("[MTClipmap] 平台不支持 BC7 且无法软件解码回退——移动端请烘焙 ASTC 格式数据；环面仍将回退 RGBA32，瓦片会加载失败");
-                else if (desired != TextureFormat.RGBA32)
-                    Debug.LogWarning($"[MTClipmap] 平台不支持 {desired}，环面回退 RGBA32（瓦片加载时 CPU 软件解码，2040² 下内存显著增大）");
+                _ringFmtA = _source.BakedTexFormatA;
+                _ringFmtN = _source.BakedTexFormatN;
             }
             _source.TileFormatA = _ringFmtA;
             _source.TileFormatN = _ringFmtN;
@@ -188,15 +187,20 @@ namespace MightyTerrainMesh
             Shader.SetGlobalFloat("_ClipLayerRes", layerResolution);
             Shader.SetGlobalInt("_ClipLevelCount", _levelCount);
             Shader.SetGlobalFloat("_ClipBlendStart", 0.75f); // §6.2：外环 25% 混合带（门闸降级①收窄至 20%）
+            Shader.SetGlobalVector("_ClipViewCameraPos", viewCamera != null ? viewCamera.transform.position : Vector3.zero);
+            Shader.SetGlobalInt("_ClipDebugLOD", (int)debugLodMode);
+            Shader.SetGlobalInt("_ClipPackedMaterial", _source.PackedMaterial ? 1 : 0);
 
             // 关闭原 VT 系统，避免冲突
             foreach (var vt in FindObjectsOfType<MTVTCreator>()) vt.enabled = false;
 
-            // L8 静态层（格式不受平台支持时 CPU 解码回退 RGBA32，与环面回退策略一致）
+            // L8 静态层按 manifest 的原始格式直接上传。
             if (_source.Mode == ClipmapStripJob.MODE_BAKED)
             {
-                var a = ClipmapSourceRuntime.LoadBakedTextureChecked(bakedResourcesRoot + "/l8_albedo", true, true);
-                var n = ClipmapSourceRuntime.LoadBakedTextureChecked(bakedResourcesRoot + "/l8_normal", false, true);
+                var a = ClipmapSourceRuntime.LoadBakedTexture(bakedResourcesRoot + "/l8_albedo", true, true,
+                    _source.L8Res, _source.L8Res, _source.BakedTexFormatA);
+                var n = ClipmapSourceRuntime.LoadBakedTexture(bakedResourcesRoot + "/l8_normal", false, true,
+                    _source.L8Res, _source.L8Res, _source.BakedTexFormatN);
                 if (a != null) { Destroy(_albedoL8); _albedoL8 = a; }
                 if (n != null) { Destroy(_normalL8); _normalL8 = n; }
                 SetupL8Sampler(_albedoL8);
@@ -222,6 +226,7 @@ namespace MightyTerrainMesh
         void OnDestroy()
         {
             Active = false;
+            Shader.SetGlobalInt("_ClipDebugLOD", 0);
             _source?.Dispose();
             if (ClipmapMaterial != null) Destroy(ClipmapMaterial);
             foreach (var t in new Object[] { _albedoArray, _normalArray, _albedoL8, _normalL8,
@@ -233,6 +238,8 @@ namespace MightyTerrainMesh
 
         void Update()
         {
+            Shader.SetGlobalVector("_ClipViewCameraPos", viewCamera != null ? viewCamera.transform.position : Vector3.zero);
+            Shader.SetGlobalInt("_ClipDebugLOD", (int)debugLodMode);
             _source.Update(); // 轮询瓦片异步加载（到位后由恢复循环自然拾取）
             TickGovernor();   // 带宽门闸（§8.1）
 
@@ -245,7 +252,7 @@ namespace MightyTerrainMesh
                 _origins[k] = ComputeOrigin(camLocal, k);
 
             // 传送检测（§5.4：阈值 = footprint(L0) = 32m）→ 全层失效，恢复循环按 粗→细 分带重填
-            if (Vector2.Distance(cam, _prevCamPos) > baseFootprint)
+            if ((cam - _prevCamPos).sqrMagnitude > baseFootprint * baseFootprint)
                 for (int k = 0; k < _levelCount; ++k)
                 {
                     _prevOrigins[k] = _origins[k];
@@ -253,7 +260,8 @@ namespace MightyTerrainMesh
                 }
             _prevCamPos = cam;
 
-            var ops = new List<StripOp>();
+            var ops = _ops;
+            ops.Clear();
             long budgetLeft = uploadBudgetBytes;
             long collected = 0;
 
@@ -368,7 +376,7 @@ namespace MightyTerrainMesh
             _refillRow[k] = 0;
         }
 
-        /// <summary>各环面格式的每 texel 字节数（§4.2 存储常数；RGBA32 = 联调解码回退）。</summary>
+        /// <summary>各环面格式的每 texel 字节数（§4.2 存储常数）。</summary>
         static double BytesPerTexel(TextureFormat f)
         {
             switch (f)
@@ -702,8 +710,8 @@ namespace MightyTerrainMesh
                 for (int i = 0; i < fillA.Length; ++i) { fillA[i] = neutralA; fillN[i] = neutralN; }
                 for (int k = 0; k < _levelCount; ++k)
                 {
-                    _albedoArray.SetPixels32(fillA, k);
-                    _normalArray.SetPixels32(fillN, k);
+                    _albedoArray.SetPixelData(fillA, 0, k);
+                    _normalArray.SetPixelData(fillN, 0, k);
                 }
                 _albedoArray.Apply(false);
                 _normalArray.Apply(false);

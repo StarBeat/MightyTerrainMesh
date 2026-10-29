@@ -1,0 +1,202 @@
+2026-10-26 15:44:46,648 - [DEBUG] - perfcat.ui.layout.title_bar - __init__.py:28 - 使用 win titlebar
+2026-10-26 15:44:46,711 - [DEBUG] - perfcat.app - app.py:74 - 加载内置stylesheet
+2026-10-26 15:44:46,712 - [DEBUG] - perfcat.app - app.py:81 - 加载stylesheet
+2026-10-26 15:44:46,942 - [DEBUG] - perfcat.ui.layout.left_menu.left_menu - left_menu.py:85 - 展开关闭导航菜单 True
+2026-10-26 15:44:46,947 - [DEBUG] - perfcat.ui.layout.left_menu.left_menu - left_menu.py:63 - 读取上一次展开关闭状态 True
+2026-10-26 15:44:47,006 - [DEBUG] - perfcat.ui.layout - __init__.py:127 - 触发切换页面 <PySide6.QtWidgets.QPushButton(0x1c3febf7840, name="Home") at 0x000001C38A57DFC0> True
+2026-10-26 15:44:47,006 - [DEBUG] - perfcat.ui.layout - __init__.py:113 - 切换页面到 Home
+2026-10-26 15:44:47,007 - [DEBUG] - perfcat.ui.layout - __init__.py:110 - 添加页面 page_name:Home title:首页
+2026-10-26 15:44:47,058 - [DEBUG] - perfcat.pages.profiler.profiler - profiler.py:222 - 更新按钮状态 valid_device:False valid_app:False
+2026-10-26 15:44:47,069 - [DEBUG] - perfcat.ui.layout - __init__.py:110 - 添加页面 page_name:Profiler title:安卓性能
+2026-10-26 15:44:49,660 - [DEBUG] - perfcat.ui.layout - __init__.py:127 - 触发切换页面 <PySide6.QtWidgets.QPushButton(0x1c3febf7840, name="Home") at 0x000001C38A57DFC0> False
+2026-10-26 15:44:49,660 - [DEBUG] - perfcat.ui.layout - __init__.py:113 - 切换页面到 Home
+2026-10-26 15:44:49,660 - [DEBUG] - perfcat.ui.layout - __init__.py:127 - 触发切换页面 <PySide6.QtWidgets.QPushButton(0x1c3ff1ef590, name="Profiler") at 0x000001C38A594E00> True
+2026-10-26 15:44:49,661 - [DEBUG] - perfcat.ui.layout - __init__.py:113 - 切换页面到 Profiler
+2026-10-26 15:44:49,696 - [DEBUG] - perfcat.pages.profiler.profiler - profiler.py:157 - 系统adb:C:\Users\1\AppData\Local\Android\Sdk\platform-tools\adb.EXE 内置adb:C:\Users\1\AppData\Local\Programs\Python\Python313\Lib\site-packages\perfcat\adb\adb.exe
+2026-10-26 15:44:50,655 - [DEBUG] - perfcat.modules.hot_plug.win - win.py:55 - 设备插入
+2026-10-26 15:44:53,761 - [DEBUG] - perfcat.ui.layout - __init__.py:127 - 触发切换页面 <PySide6.QtWidgets.QPushButton(0x1c3ff1ef590, name="Profiler") at 0x000001C38A594E00> False
+2026-10-26 15:44:53,761 - [DEBUG] - perfcat.ui.layout - __init__.py:113 - 切换页面到 Profiler
+2026-10-26 15:44:53,761 - [DEBUG] - perfcat.ui.layout - __init__.py:127 - 触发切换页面 <PySide6.QtWidgets.QPushButton(0x1c3febf7840, name="Home") at 0x000001C38A57DFC0> True
+2026-10-26 15:44:53,761 - [DEBUG] - perfcat.ui.layout - __init__.py:113 - 切换页面到 Home
+2026-10-26 15:44:53,761 - [DEBUG] - perfcat.pages.profiler.profiler - profiler.py:407 - 停止采样
+2026-10-26 15:44:56,364 - [DEBUG] - perfcat.ui.layout - __init__.py:127 - 触发切换页面 <PySide6.QtWidgets.QPushButton(0x1c3febf7840, name="Home") at 0x000001C38A57DFC0> False
+2026-10-26 15:44:56,364 - [DEBUG] - perfcat.ui.layout - __init__.py:113 - 切换页面到 Home
+2026-10-26 15:44:56,365 - [DEBUG] - perfcat.ui.layout - __init__.py:127 - 触发切换页面 <PySide6.QtWidgets.QPushButton(0x1c3ff1ef590, name="Profiler") at 0x000001C38A594E00> True
+2026-10-26 15:44:56,365 - [DEBUG] - perfcat.ui.layout - __init__.py:113 - 切换页面到 Profiler
+2026-10-26 15:44:56,393 - [DEBUG] - perfcat.pages.profiler.profiler - profiler.py:157 - 系统adb:C:\Users\1\AppData\Local\Android\Sdk\platform-tools\adb.EXE 内置adb:C:\Users\1\AppData\Local\Programs\Python\Python313\Lib\site-packages\perfcat\adb\adb.exe
+2026-10-26 15:44:58,696 - [DEBUG] - perfcat.ui.widgets.notification - __init__.py:78 - 开始销毁动画
+2026-10-26 15:44:58,846 - [DEBUG] - perfcat.pages.profiler.profiler - profiler.py:222 - 更新按钮状态 valid_device:True valid_app:False
+2026-10-26 15:44:58,927 - [DEBUG] - perfcat.ui.widgets.notification - __init__.py:88 - 调用deletelater
+2026-10-26 15:44:58,928 - [DEBUG] - perfcat.ui.widgets.notification - __init__.py:83 - 减少Notification.count的计数
+2026-10-26 15:45:03,808 - [DEBUG] - perfcat.pages.profiler.profiler - profiler.py:222 - 更新按钮状态 valid_device:True valid_app:False
+2026-10-26 15:45:04,565 - [DEBUG] - perfcat.pages.profiler.profiler - profiler.py:222 - 更新按钮状态 valid_device:True valid_app:False
+2026-10-26 15:45:04,675 - [DEBUG] - perfcat.pages.profiler.profiler - profiler.py:222 - 更新按钮状态 valid_device:True valid_app:True
+2026-10-26 15:45:06,763 - [DEBUG] - perfcat.pages.profiler.profiler - profiler.py:427 - 连接设备 HA2H94Q0
+2026-10-26 15:45:06,765 - [DEBUG] - perfcat.pages.profiler.profiler - profiler.py:360 - 开始采样
+2026-10-26 15:45:06,797 - [WARNING] - perfcat.modules.profiler.fps - fps.py:55 - 没有找到surface
+2026-10-26 15:45:06,798 - [WARNING] - perfcat.modules.profiler.fps - fps.py:55 - 没有找到surface
+2026-10-26 15:45:06,818 - [WARNING] - perfcat.modules.profiler.temp - temp.py:115 - LENOVO-TB323FU 没有匹配到['npu-usr', 'npu'] 无法获得其温度，改用整体温度表示
+2026-10-26 15:45:07,780 - [WARNING] - perfcat.modules.profiler.temp - temp.py:115 - LENOVO-TB323FU 没有匹配到['npu-usr', 'npu'] 无法获得其温度，改用整体温度表示
+2026-10-26 15:45:07,805 - [WARNING] - perfcat.modules.profiler.fps - fps.py:55 - 没有找到surface
+2026-10-26 15:45:07,806 - [WARNING] - perfcat.modules.profiler.fps - fps.py:55 - 没有找到surface
+2026-10-26 15:45:08,796 - [WARNING] - perfcat.modules.profiler.temp - temp.py:115 - LENOVO-TB323FU 没有匹配到['npu-usr', 'npu'] 无法获得其温度，改用整体温度表示
+2026-10-26 15:45:08,821 - [WARNING] - perfcat.modules.profiler.fps - fps.py:55 - 没有找到surface
+2026-10-26 15:45:08,823 - [WARNING] - perfcat.modules.profiler.fps - fps.py:55 - 没有找到surface
+2026-10-26 15:45:09,805 - [WARNING] - perfcat.modules.profiler.temp - temp.py:115 - LENOVO-TB323FU 没有匹配到['npu-usr', 'npu'] 无法获得其温度，改用整体温度表示
+2026-10-26 15:45:09,832 - [WARNING] - perfcat.modules.profiler.fps - fps.py:55 - 没有找到surface
+2026-10-26 15:45:09,835 - [WARNING] - perfcat.modules.profiler.fps - fps.py:55 - 没有找到surface
+2026-10-26 15:45:10,814 - [WARNING] - perfcat.modules.profiler.temp - temp.py:115 - LENOVO-TB323FU 没有匹配到['npu-usr', 'npu'] 无法获得其温度，改用整体温度表示
+2026-10-26 15:45:10,836 - [WARNING] - perfcat.modules.profiler.fps - fps.py:55 - 没有找到surface
+2026-10-26 15:45:10,838 - [WARNING] - perfcat.modules.profiler.fps - fps.py:55 - 没有找到surface
+2026-10-26 15:45:11,755 - [DEBUG] - perfcat.ui.widgets.notification - __init__.py:78 - 开始销毁动画
+2026-10-26 15:45:11,822 - [WARNING] - perfcat.modules.profiler.temp - temp.py:115 - LENOVO-TB323FU 没有匹配到['npu-usr', 'npu'] 无法获得其温度，改用整体温度表示
+2026-10-26 15:45:11,845 - [WARNING] - perfcat.modules.profiler.fps - fps.py:55 - 没有找到surface
+2026-10-26 15:45:11,845 - [WARNING] - perfcat.modules.profiler.fps - fps.py:55 - 没有找到surface
+2026-10-26 15:45:11,975 - [DEBUG] - perfcat.ui.widgets.notification - __init__.py:88 - 调用deletelater
+2026-10-26 15:45:11,975 - [DEBUG] - perfcat.ui.widgets.notification - __init__.py:83 - 减少Notification.count的计数
+2026-10-26 15:45:12,831 - [WARNING] - perfcat.modules.profiler.temp - temp.py:115 - LENOVO-TB323FU 没有匹配到['npu-usr', 'npu'] 无法获得其温度，改用整体温度表示
+2026-10-26 15:45:12,861 - [WARNING] - perfcat.modules.profiler.fps - fps.py:55 - 没有找到surface
+2026-10-26 15:45:12,863 - [WARNING] - perfcat.modules.profiler.fps - fps.py:55 - 没有找到surface
+2026-10-26 15:45:13,836 - [WARNING] - perfcat.modules.profiler.temp - temp.py:115 - LENOVO-TB323FU 没有匹配到['npu-usr', 'npu'] 无法获得其温度，改用整体温度表示
+2026-10-26 15:45:13,863 - [WARNING] - perfcat.modules.profiler.fps - fps.py:55 - 没有找到surface
+2026-10-26 15:45:13,865 - [WARNING] - perfcat.modules.profiler.fps - fps.py:55 - 没有找到surface
+2026-10-26 15:45:14,843 - [WARNING] - perfcat.modules.profiler.temp - temp.py:115 - LENOVO-TB323FU 没有匹配到['npu-usr', 'npu'] 无法获得其温度，改用整体温度表示
+2026-10-26 15:45:14,865 - [WARNING] - perfcat.modules.profiler.fps - fps.py:55 - 没有找到surface
+2026-10-26 15:45:14,867 - [WARNING] - perfcat.modules.profiler.fps - fps.py:55 - 没有找到surface
+2026-10-26 15:45:15,851 - [WARNING] - perfcat.modules.profiler.temp - temp.py:115 - LENOVO-TB323FU 没有匹配到['npu-usr', 'npu'] 无法获得其温度，改用整体温度表示
+2026-10-26 15:45:15,877 - [WARNING] - perfcat.modules.profiler.fps - fps.py:55 - 没有找到surface
+2026-10-26 15:45:15,877 - [WARNING] - perfcat.modules.profiler.fps - fps.py:55 - 没有找到surface
+2026-10-26 15:45:16,863 - [WARNING] - perfcat.modules.profiler.temp - temp.py:115 - LENOVO-TB323FU 没有匹配到['npu-usr', 'npu'] 无法获得其温度，改用整体温度表示
+2026-10-26 15:45:16,893 - [WARNING] - perfcat.modules.profiler.fps - fps.py:55 - 没有找到surface
+2026-10-26 15:45:16,893 - [WARNING] - perfcat.modules.profiler.fps - fps.py:55 - 没有找到surface
+2026-10-26 15:45:17,871 - [WARNING] - perfcat.modules.profiler.temp - temp.py:115 - LENOVO-TB323FU 没有匹配到['npu-usr', 'npu'] 无法获得其温度，改用整体温度表示
+2026-10-26 15:45:17,893 - [WARNING] - perfcat.modules.profiler.fps - fps.py:55 - 没有找到surface
+2026-10-26 15:45:17,893 - [WARNING] - perfcat.modules.profiler.fps - fps.py:55 - 没有找到surface
+2026-10-26 15:45:18,884 - [WARNING] - perfcat.modules.profiler.temp - temp.py:115 - LENOVO-TB323FU 没有匹配到['npu-usr', 'npu'] 无法获得其温度，改用整体温度表示
+2026-10-26 15:45:18,909 - [WARNING] - perfcat.modules.profiler.fps - fps.py:55 - 没有找到surface
+2026-10-26 15:45:18,910 - [WARNING] - perfcat.modules.profiler.fps - fps.py:55 - 没有找到surface
+2026-10-26 15:45:19,889 - [WARNING] - perfcat.modules.profiler.temp - temp.py:115 - LENOVO-TB323FU 没有匹配到['npu-usr', 'npu'] 无法获得其温度，改用整体温度表示
+2026-10-26 15:45:19,912 - [WARNING] - perfcat.modules.profiler.fps - fps.py:55 - 没有找到surface
+2026-10-26 15:45:19,915 - [WARNING] - perfcat.modules.profiler.fps - fps.py:55 - 没有找到surface
+2026-10-26 15:45:20,899 - [WARNING] - perfcat.modules.profiler.temp - temp.py:115 - LENOVO-TB323FU 没有匹配到['npu-usr', 'npu'] 无法获得其温度，改用整体温度表示
+2026-10-26 15:45:20,925 - [WARNING] - perfcat.modules.profiler.fps - fps.py:55 - 没有找到surface
+2026-10-26 15:45:20,927 - [WARNING] - perfcat.modules.profiler.fps - fps.py:55 - 没有找到surface
+2026-10-26 15:45:21,642 - [DEBUG] - perfcat.ui.widgets.notification - __init__.py:78 - 开始销毁动画
+2026-10-26 15:45:21,866 - [DEBUG] - perfcat.ui.widgets.notification - __init__.py:88 - 调用deletelater
+2026-10-26 15:45:21,866 - [DEBUG] - perfcat.ui.widgets.notification - __init__.py:83 - 减少Notification.count的计数
+2026-10-26 15:45:21,908 - [WARNING] - perfcat.modules.profiler.temp - temp.py:115 - LENOVO-TB323FU 没有匹配到['npu-usr', 'npu'] 无法获得其温度，改用整体温度表示
+2026-10-26 15:45:21,934 - [WARNING] - perfcat.modules.profiler.fps - fps.py:55 - 没有找到surface
+2026-10-26 15:45:21,936 - [WARNING] - perfcat.modules.profiler.fps - fps.py:55 - 没有找到surface
+2026-10-26 15:45:22,920 - [WARNING] - perfcat.modules.profiler.temp - temp.py:115 - LENOVO-TB323FU 没有匹配到['npu-usr', 'npu'] 无法获得其温度，改用整体温度表示
+2026-10-26 15:45:22,938 - [WARNING] - perfcat.modules.profiler.fps - fps.py:55 - 没有找到surface
+2026-10-26 15:45:22,939 - [WARNING] - perfcat.modules.profiler.fps - fps.py:55 - 没有找到surface
+2026-10-26 15:45:23,931 - [WARNING] - perfcat.modules.profiler.temp - temp.py:115 - LENOVO-TB323FU 没有匹配到['npu-usr', 'npu'] 无法获得其温度，改用整体温度表示
+2026-10-26 15:45:23,952 - [WARNING] - perfcat.modules.profiler.fps - fps.py:55 - 没有找到surface
+2026-10-26 15:45:23,953 - [WARNING] - perfcat.modules.profiler.fps - fps.py:55 - 没有找到surface
+2026-10-26 15:45:24,940 - [WARNING] - perfcat.modules.profiler.temp - temp.py:115 - LENOVO-TB323FU 没有匹配到['npu-usr', 'npu'] 无法获得其温度，改用整体温度表示
+2026-10-26 15:45:24,974 - [WARNING] - perfcat.modules.profiler.fps - fps.py:55 - 没有找到surface
+2026-10-26 15:45:24,974 - [WARNING] - perfcat.modules.profiler.fps - fps.py:55 - 没有找到surface
+2026-10-26 15:45:24,986 - [ERROR] - root - __init__.py:8 - 未捕获的异常: Traceback (most recent call last):
+  File "C:\Users\1\AppData\Local\Programs\Python\Python313\Lib\site-packages\perfcat\pages\profiler\profiler.py", line 74, in run
+    self.func(*self.args, **self.kwargs)
+    ~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\1\AppData\Local\Programs\Python\Python313\Lib\site-packages\perfcat\pages\profiler\plugins\temp_monitor.py", line 47, in sample
+    temp_data = self.mark_temp_sampler.get_temp()
+  File "C:\Users\1\AppData\Local\Programs\Python\Python313\Lib\site-packages\perfcat\modules\profiler\temp.py", line 140, in get_temp
+    self.get_sensor_temp(npu_temp_index) if npu_temp_index is not None else 0
+    ~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^
+  File "C:\Users\1\AppData\Local\Programs\Python\Python313\Lib\site-packages\perfcat\modules\profiler\temp.py", line 101, in get_sensor_temp
+    temp_value = self.device.shell(self.TEMP_CMD.format(filename=file_name)) or "0"
+                 ~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\1\AppData\Local\Programs\Python\Python313\Lib\site-packages\ppadb\command\transport\__init__.py", line 20, in shell
+    conn = self.create_connection(timeout=timeout)
+  File "C:\Users\1\AppData\Local\Programs\Python\Python313\Lib\site-packages\ppadb\device.py", line 45, in create_connection
+    self.transport(conn)
+    ~~~~~~~~~~~~~~^^^^^^
+  File "C:\Users\1\AppData\Local\Programs\Python\Python313\Lib\site-packages\ppadb\command\transport\__init__.py", line 15, in transport
+    connection.send(cmd)
+    ~~~~~~~~~~~~~~~^^^^^
+  File "C:\Users\1\AppData\Local\Programs\Python\Python313\Lib\site-packages\ppadb\connection.py", line 84, in send
+    return self._check_status()
+           ~~~~~~~~~~~~~~~~~~^^
+  File "C:\Users\1\AppData\Local\Programs\Python\Python313\Lib\site-packages\ppadb\connection.py", line 90, in _check_status
+    raise RuntimeError("ERROR: {} {}".format(repr(recv), error))
+RuntimeError: ERROR: 'FAIL' 001bdevice 'HA2H94Q0' not found
+NoneType: None
+2026-10-26 15:45:24,986 - [ERROR] - root - __init__.py:8 - 未捕获的异常: Traceback (most recent call last):
+  File "C:\Users\1\AppData\Local\Programs\Python\Python313\Lib\site-packages\perfcat\pages\profiler\profiler.py", line 74, in run
+    self.func(*self.args, **self.kwargs)
+    ~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\1\AppData\Local\Programs\Python\Python313\Lib\site-packages\perfcat\pages\profiler\plugins\cpu_monitor.py", line 89, in sample
+    factor = normalize_factor(device)
+  File "C:\Users\1\AppData\Local\Programs\Python\Python313\Lib\site-packages\perfcat\modules\profiler\cpu.py", line 51, in normalize_factor
+    online = device.shell(online_cmd)
+  File "C:\Users\1\AppData\Local\Programs\Python\Python313\Lib\site-packages\ppadb\command\transport\__init__.py", line 20, in shell
+    conn = self.create_connection(timeout=timeout)
+  File "C:\Users\1\AppData\Local\Programs\Python\Python313\Lib\site-packages\ppadb\device.py", line 45, in create_connection
+    self.transport(conn)
+    ~~~~~~~~~~~~~~^^^^^^
+  File "C:\Users\1\AppData\Local\Programs\Python\Python313\Lib\site-packages\ppadb\command\transport\__init__.py", line 15, in transport
+    connection.send(cmd)
+    ~~~~~~~~~~~~~~~^^^^^
+  File "C:\Users\1\AppData\Local\Programs\Python\Python313\Lib\site-packages\ppadb\connection.py", line 84, in send
+    return self._check_status()
+           ~~~~~~~~~~~~~~~~~~^^
+  File "C:\Users\1\AppData\Local\Programs\Python\Python313\Lib\site-packages\ppadb\connection.py", line 90, in _check_status
+    raise RuntimeError("ERROR: {} {}".format(repr(recv), error))
+RuntimeError: ERROR: 'FAIL' 001bdevice 'HA2H94Q0' not found
+NoneType: None
+2026-10-26 15:45:24,990 - [DEBUG] - perfcat.modules.hot_plug.win - win.py:60 - 设备移除
+2026-10-26 15:45:25,950 - [WARNING] - perfcat.modules.profiler.temp - temp.py:115 - LENOVO-TB323FU 没有匹配到['npu-usr', 'npu'] 无法获得其温度，改用整体温度表示
+2026-10-26 15:45:25,958 - [DEBUG] - perfcat.modules.hot_plug.win - win.py:55 - 设备插入
+2026-10-26 15:45:28,017 - [WARNING] - perfcat.modules.profiler.fps - fps.py:55 - 没有找到surface
+2026-10-26 15:45:28,017 - [WARNING] - perfcat.modules.profiler.fps - fps.py:55 - 没有找到surface
+2026-10-26 15:45:28,259 - [WARNING] - perfcat.modules.profiler.temp - temp.py:115 - LENOVO-TB323FU 没有匹配到['npu-usr', 'npu'] 无法获得其温度，改用整体温度表示
+2026-10-26 15:45:28,271 - [WARNING] - perfcat.modules.profiler.fps - fps.py:55 - 没有找到surface
+2026-10-26 15:45:28,274 - [WARNING] - perfcat.modules.profiler.fps - fps.py:55 - 没有找到surface
+2026-10-26 15:45:29,274 - [WARNING] - perfcat.modules.profiler.temp - temp.py:115 - LENOVO-TB323FU 没有匹配到['npu-usr', 'npu'] 无法获得其温度，改用整体温度表示
+2026-10-26 15:45:30,810 - [WARNING] - perfcat.modules.profiler.fps - fps.py:55 - 没有找到surface
+2026-10-26 15:45:30,810 - [WARNING] - perfcat.modules.profiler.fps - fps.py:55 - 没有找到surface
+2026-10-26 15:45:31,017 - [WARNING] - perfcat.modules.profiler.temp - temp.py:115 - LENOVO-TB323FU 没有匹配到['npu-usr', 'npu'] 无法获得其温度，改用整体温度表示
+2026-10-26 15:45:31,034 - [WARNING] - perfcat.modules.profiler.fps - fps.py:55 - 没有找到surface
+2026-10-26 15:45:31,036 - [WARNING] - perfcat.modules.profiler.fps - fps.py:55 - 没有找到surface
+2026-10-26 15:45:31,412 - [DEBUG] - perfcat.ui.layout - __init__.py:127 - 触发切换页面 <PySide6.QtWidgets.QPushButton(0x1c3ff1ef590, name="Profiler") at 0x000001C38A594E00> False
+2026-10-26 15:45:31,413 - [DEBUG] - perfcat.ui.layout - __init__.py:113 - 切换页面到 Profiler
+2026-10-26 15:45:31,413 - [DEBUG] - perfcat.ui.layout - __init__.py:127 - 触发切换页面 <PySide6.QtWidgets.QPushButton(0x1c3febf7840, name="Home") at 0x000001C38A57DFC0> True
+2026-10-26 15:45:31,413 - [DEBUG] - perfcat.ui.layout - __init__.py:113 - 切换页面到 Home
+2026-10-26 15:45:31,413 - [DEBUG] - perfcat.pages.profiler.profiler - profiler.py:436 - 断开设备 HA2H94Q0
+2026-10-26 15:45:31,415 - [DEBUG] - perfcat.pages.profiler.profiler - profiler.py:407 - 停止采样
+2026-10-26 15:45:32,020 - [DEBUG] - perfcat.pages.profiler.profiler - profiler.py:401 - 采样线程退出
+2026-10-26 15:45:32,022 - [DEBUG] - perfcat.pages.profiler.profiler - profiler.py:554 - 结束录制，录制的时间范围是 [9, 23]
+2026-10-26 15:45:36,420 - [DEBUG] - perfcat.ui.widgets.notification - __init__.py:78 - 开始销毁动画
+2026-10-26 15:45:36,466 - [DEBUG] - perfcat.ui.layout - __init__.py:127 - 触发切换页面 <PySide6.QtWidgets.QPushButton(0x1c3febf7840, name="Home") at 0x000001C38A57DFC0> False
+2026-10-26 15:45:36,466 - [DEBUG] - perfcat.ui.layout - __init__.py:113 - 切换页面到 Home
+2026-10-26 15:45:36,467 - [DEBUG] - perfcat.ui.layout - __init__.py:127 - 触发切换页面 <PySide6.QtWidgets.QPushButton(0x1c3ff1ef590, name="Profiler") at 0x000001C38A594E00> True
+2026-10-26 15:45:36,467 - [DEBUG] - perfcat.ui.layout - __init__.py:113 - 切换页面到 Profiler
+2026-10-26 15:45:36,490 - [DEBUG] - perfcat.pages.profiler.profiler - profiler.py:157 - 系统adb:C:\Users\1\AppData\Local\Android\Sdk\platform-tools\adb.EXE 内置adb:C:\Users\1\AppData\Local\Programs\Python\Python313\Lib\site-packages\perfcat\adb\adb.exe
+2026-10-26 15:45:36,519 - [DEBUG] - perfcat.pages.profiler.profiler - profiler.py:222 - 更新按钮状态 valid_device:True valid_app:True
+2026-10-26 15:45:36,536 - [DEBUG] - perfcat.pages.profiler.profiler - profiler.py:222 - 更新按钮状态 valid_device:True valid_app:False
+2026-10-26 15:45:36,536 - [DEBUG] - perfcat.pages.profiler.profiler - profiler.py:222 - 更新按钮状态 valid_device:True valid_app:False
+2026-10-26 15:45:36,646 - [DEBUG] - perfcat.ui.widgets.notification - __init__.py:88 - 调用deletelater
+2026-10-26 15:45:36,646 - [DEBUG] - perfcat.ui.widgets.notification - __init__.py:83 - 减少Notification.count的计数
+2026-10-26 15:45:37,027 - [DEBUG] - perfcat.ui.widgets.notification - __init__.py:78 - 开始销毁动画
+2026-10-26 15:45:37,251 - [DEBUG] - perfcat.ui.widgets.notification - __init__.py:88 - 调用deletelater
+2026-10-26 15:45:37,251 - [DEBUG] - perfcat.ui.widgets.notification - __init__.py:83 - 减少Notification.count的计数
+2026-10-26 15:45:46,477 - [DEBUG] - perfcat.ui.layout - __init__.py:127 - 触发切换页面 <PySide6.QtWidgets.QPushButton(0x1c3ff1ef590, name="Profiler") at 0x000001C38A594E00> False
+2026-10-26 15:45:46,477 - [DEBUG] - perfcat.ui.layout - __init__.py:113 - 切换页面到 Profiler
+2026-10-26 15:45:46,477 - [DEBUG] - perfcat.ui.layout - __init__.py:127 - 触发切换页面 <PySide6.QtWidgets.QPushButton(0x1c3febf7840, name="Home") at 0x000001C38A57DFC0> True
+2026-10-26 15:45:46,478 - [DEBUG] - perfcat.ui.layout - __init__.py:113 - 切换页面到 Home
+2026-10-26 15:45:46,478 - [DEBUG] - perfcat.pages.profiler.profiler - profiler.py:436 - 断开设备 HA2H94Q0
+2026-10-26 15:45:46,480 - [DEBUG] - perfcat.pages.profiler.profiler - profiler.py:407 - 停止采样
+2026-10-26 15:45:50,885 - [DEBUG] - perfcat.ui.layout - __init__.py:127 - 触发切换页面 <PySide6.QtWidgets.QPushButton(0x1c3febf7840, name="Home") at 0x000001C38A57DFC0> False
+2026-10-26 15:45:50,885 - [DEBUG] - perfcat.ui.layout - __init__.py:113 - 切换页面到 Home
+2026-10-26 15:45:50,885 - [DEBUG] - perfcat.ui.layout - __init__.py:127 - 触发切换页面 <PySide6.QtWidgets.QPushButton(0x1c3ff1ef590, name="Profiler") at 0x000001C38A594E00> True
+2026-10-26 15:45:50,885 - [DEBUG] - perfcat.ui.layout - __init__.py:113 - 切换页面到 Profiler
+2026-10-26 15:45:50,908 - [DEBUG] - perfcat.pages.profiler.profiler - profiler.py:157 - 系统adb:C:\Users\1\AppData\Local\Android\Sdk\platform-tools\adb.EXE 内置adb:C:\Users\1\AppData\Local\Programs\Python\Python313\Lib\site-packages\perfcat\adb\adb.exe
+2026-10-26 15:45:50,976 - [DEBUG] - perfcat.pages.profiler.profiler - profiler.py:222 - 更新按钮状态 valid_device:True valid_app:False
+2026-10-26 15:45:51,488 - [DEBUG] - perfcat.ui.widgets.notification - __init__.py:78 - 开始销毁动画
+2026-10-26 15:45:51,717 - [DEBUG] - perfcat.ui.widgets.notification - __init__.py:88 - 调用deletelater
+2026-10-26 15:45:51,736 - [DEBUG] - perfcat.ui.widgets.notification - __init__.py:83 - 减少Notification.count的计数
+2026-10-26 15:47:54,596 - [DEBUG] - perfcat.pages.profiler.profiler - profiler.py:436 - 断开设备 HA2H94Q0
+2026-10-26 15:47:54,598 - [DEBUG] - perfcat.pages.profiler.profiler - profiler.py:407 - 停止采样
+2026-10-26 15:47:54,610 - [DEBUG] - perfcat.ui.widgets.notification - __init__.py:83 - 减少Notification.count的计数

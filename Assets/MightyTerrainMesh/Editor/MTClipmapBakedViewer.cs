@@ -11,7 +11,7 @@ namespace MightyTerrainMesh.EditorTools
     /// - 直接读取 .bytes 文件（不经过 Resources/AssetDatabase，烘焙落盘即可查看）；
     /// - 支持 l7/l8/block_* 的 albedo 与 normal，以及 tiles/ 瓦片金字塔（网格地图点选、纹理懒加载）；
     /// - 格式支持 RGBA32 / BC7（§10 桌面）/ ASTC_6x6 / ASTC_5x5，RGB/R/G/B/A 通道隔离；
-    /// - normal 可解码为法线可视化（RG=法线XZ → 重建 Up 分量；B=粗糙度、A=AO 走通道隔离查看）；
+    /// - albedo.A=Metallic；normal 可解码为法线可视化（RG=法线XZ → 重建 Up 分量；B=粗糙度、A=AO 走通道隔离查看）；
     /// - 含 mip 链的纹理（L8）可逐级查看，验证离线 mip 是否正确生成；
     /// - l7/l8 预览上叠加 manifest 高精块区域框（旧数据）；鼠标位置 → UV/texel/世界坐标读数。
     /// </summary>
@@ -122,10 +122,17 @@ namespace MightyTerrainMesh.EditorTools
                 return;
             }
             string mf = Path.Combine(full, "manifest.json");
-            if (File.Exists(mf))
+            if (!File.Exists(mf))
             {
-                try { _manifest = JsonUtility.FromJson<ClipmapManifest>(File.ReadAllText(mf)); }
-                catch (Exception e) { Debug.LogWarning("[ClipmapViewer] manifest 解析失败: " + e.Message); }
+                _loadError = "缺少 manifest.json，无法确定纹理尺寸和格式";
+                return;
+            }
+            try { _manifest = JsonUtility.FromJson<ClipmapManifest>(File.ReadAllText(mf)); }
+            catch (Exception e) { _loadError = "manifest 解析失败: " + e.Message; return; }
+            if (_manifest == null || _manifest.textureDataVersion != ClipmapManifest.CurrentTextureDataVersion)
+            {
+                _loadError = "纹理数据版本不匹配，请重新烘焙纯 raw 数据";
+                return;
             }
             foreach (var f in Directory.GetFiles(full, "*.bytes"))
             {
@@ -208,27 +215,28 @@ namespace MightyTerrainMesh.EditorTools
         {
             try
             {
+                int res = e.isTile ? _manifest.tileRes
+                    : e.name.StartsWith("l7_") ? _manifest.l7Res
+                    : e.name.StartsWith("l8_") ? _manifest.l8Res
+                    : e.blockIndex >= 0 ? _manifest.blockRes : 0;
+                if (res <= 0) { e.error = "manifest 中没有该条目的有效分辨率"; return; }
+                e.width = e.height = res;
+                e.format = (TextureFormat)(e.isNormal ? _manifest.texFormatN : _manifest.texFormat);
                 var bytes = File.ReadAllBytes(e.path);
-                e.width = BitConverter.ToInt32(bytes, 0);
-                e.height = BitConverter.ToInt32(bytes, 4);
-                e.format = (TextureFormat)BitConverter.ToInt32(bytes, 8);
-                int payload = bytes.Length - 12;
-                // 依据数据长度判断是否含完整 mip 链（与烘焙端 SaveClipmapTex 的布局对应）
+                // 依据纯 raw 数据长度判断是否含完整 mip 链。
                 int sizeNoMip = MipDataSize(e.width, e.height, e.format, false);
                 int sizeFull = MipDataSize(e.width, e.height, e.format, true);
                 bool hasMips;
-                if (payload == sizeFull && sizeFull != sizeNoMip) hasMips = true;
-                else if (payload == sizeNoMip) hasMips = false;
+                if (bytes.Length == sizeFull && sizeFull != sizeNoMip) hasMips = true;
+                else if (bytes.Length == sizeNoMip) hasMips = false;
                 else
                 {
-                    e.error = $"数据长度 {payload}B 与 {e.format} {e.width}×{e.height} 不匹配" +
-                              $"（无 mip 应 {sizeNoMip}B，含 mip 链应 {sizeFull}B）——可能是旧版烘焙数据，请重新烘焙";
+                    e.error = $"数据长度 {bytes.Length}B 与 {e.format} {e.width}×{e.height} 不匹配" +
+                              $"（无 mip 应 {sizeNoMip}B，含 mip 链应 {sizeFull}B）";
                     return;
                 }
                 var tex = new Texture2D(e.width, e.height, e.format, hasMips, !e.sRGB);
-                var data = new byte[payload];
-                Buffer.BlockCopy(bytes, 12, data, 0, payload);
-                tex.LoadRawTextureData(data);
+                tex.LoadRawTextureData(bytes);
                 tex.Apply(false);
                 tex.wrapMode = TextureWrapMode.Clamp;
                 e.tex = tex;
@@ -312,7 +320,7 @@ namespace MightyTerrainMesh.EditorTools
             }
             // 显示纹理用 linear：原始字节值直显（数据查看器要 WYSIWYG，不做 sRGB 二次解释）
             var d = new Texture2D(w, h, TextureFormat.RGBA32, false, true);
-            d.SetPixels32(outPx);
+            d.SetPixelData(outPx, 0);
             d.Apply(false);
             d.filterMode = _pointFilter ? FilterMode.Point : FilterMode.Bilinear;
             d.wrapMode = TextureWrapMode.Clamp;
@@ -378,7 +386,7 @@ namespace MightyTerrainMesh.EditorTools
                 foreach (var t in list)
                     px[t.tz * _tileMapRes / gc * _tileMapRes + t.tx * _tileMapRes / gc] = on;
                 _tileMapTex = new Texture2D(_tileMapRes, _tileMapRes, TextureFormat.RGBA32, false, true);
-                _tileMapTex.SetPixels32(px);
+                _tileMapTex.SetPixelData(px, 0);
                 _tileMapTex.Apply(false);
                 _tileMapTex.filterMode = FilterMode.Point;
                 _tileMapLevel = level;

@@ -1,7 +1,8 @@
 // ClipmapVT shader：按 ClipmapVT.md v2.5 §6 采样规范实现（固定图集寻址 + 动态层数 K）
 // - L0–L(K-1)：Texture2DArray 环面层（Repeat，无 Mip）；uv = frac(localXZ / footprint_k)，origin 仅 CPU 更新簿记
 // - L_K（静态层）：独立 Texture2D（Clamp + 完整 Mip 链 + Trilinear/Aniso 2x）；globalUV 连续无折叠，硬件导数自动选 mip
-// - 选层：像素足迹 F（米/px）→ lod = log2(F · layerRes / baseFootprint)，clamp 到 [0, K]（_ClipLevelCount）
+// - 选层：max(像素足迹 F → log2(F·layerRes/baseFootprint)，距离下界 ceil(log2(2r/baseFootprint)))，
+//   clamp 到 [0, K]（_ClipLevelCount）；距离下界保证所层环面窗口覆盖采样点（r ≤ R_k）
 // - 过渡：外环混合带（_ClipBlendStart，默认 25%，带宽门闸收窄至 20%），法线混合后 renormalize（§6.3）
 Shader "MT/TerrainClipmap"
 {
@@ -55,6 +56,9 @@ Shader "MT/TerrainClipmap"
 			int    _ClipValidMask;      // §6.5 驻留掩码：bit k = 环面层 k 有效，bit K = 静态层恒有效
 			int    _ClipLevelCount;     // §3.1.1 动态层数 K = log2(S)−5（静态层 = L_K）
 			float  _ClipBlendStart;     // §6.2/§8.1 外环混合带起点（占 footprint 半径比例，默认 0.75，门闸降级①调至 0.80）
+			float3 _ClipViewCameraPos;  // 固定的主相机位置，Scene 窗口不使用 Scene 相机替代
+			int    _ClipDebugLOD;       // 0：关闭；1：请求层（足迹与距离取 max）；2：包含驻留回退
+			int    _ClipPackedMaterial; // 1：Albedo.A=Metallic；0：旧烘焙固定非金属
 
 			struct Attributes
 			{
@@ -105,6 +109,22 @@ Shader "MT/TerrainClipmap"
 				return k;
 			}
 
+			half3 LodDebugColor(int level)
+			{
+				switch (level)
+				{
+					case 0: return half3(1.0h, 0.1h, 0.1h); // 红
+					case 1: return half3(1.0h, 0.5h, 0.0h); // 橙
+					case 2: return half3(1.0h, 1.0h, 0.0h); // 黄
+					case 3: return half3(0.1h, 0.9h, 0.1h); // 绿
+					case 4: return half3(0.0h, 0.9h, 0.9h); // 青
+					case 5: return half3(0.1h, 0.3h, 1.0h); // 蓝
+					case 6: return half3(0.6h, 0.2h, 1.0h); // 紫
+					case 7: return half3(1.0h, 0.1h, 0.7h); // 品红
+					default: return half3(1.0h, 1.0h, 1.0h); // 静态层：白
+				}
+			}
+
 			// 环面层采样：uv = frac(localXZ / footprint_k)，显式 wrap（Repeat 等价）
 			// 固定图集寻址（v2.3.2）：origin 不参与采样地址，仅用于 CPU 侧更新簿记
 			float4 SampleClipAlbedo(int k, float2 localXZ)
@@ -142,18 +162,28 @@ Shader "MT/TerrainClipmap"
 				// ---- §6.2 解析 LOD（导数只用全局连续 UV）----
 				float2 localXZ  = IN.positionWS.xz - _TerrainOrigin.xz;
 				float2 globalUV = localXZ / _TerrainSize;
+				float2 camLocalXZ = _ClipViewCameraPos.xz - _TerrainOrigin.xz;
+				float  r = length(localXZ - camLocalXZ);
 
 				float2 ddxUV = ddx(globalUV) * _TerrainSize;   // 米/像素
 				float2 ddyUV = ddy(globalUV) * _TerrainSize;
 				float  F  = sqrt(max(dot(ddxUV, ddxUV), dot(ddyUV, ddyUV)));
 				// texel_k = baseFootprint·2^k / layerRes → lodF = log2(F / texel_0)
 				float  lodF   = log2(max(F, 1e-5) * _ClipLayerRes / _ClipBaseFootprint);
-				float  lod    = clamp(lodF, 0.0, (float)_ClipLevelCount);
-				int    level  = FinestValidLevel((int)floor(lod)); // §6.5：向上扫描到已驻留层
+				// 距离下界：层 k 环面窗口只覆盖 r ≤ R_k（R_k = fp_k/2）。俯视/高空相机下 F 不随 r 增长，
+				// 仅按 lodF 选层会选出窗口覆盖不到该点的层，混合带采到 frac wrap 后的别处内容（位置错位）。
+				int    ringK  = (int)ceil(log2(max(r * 2.0 / _ClipBaseFootprint, 1.0)));
+				int    requestedLevel = clamp(max((int)floor(lodF), ringK), 0, _ClipLevelCount);
+				int    level  = FinestValidLevel(requestedLevel); // §6.5：向上扫描到已驻留层
+
+				[branch] if (_ClipDebugLOD != 0)
+				{
+					int debugLevel = _ClipDebugLOD == 2 ? level : requestedLevel;
+					half3 debugColor = debugLevel >= _ClipLevelCount ? half3(1.0h, 1.0h, 1.0h) : LodDebugColor(debugLevel);
+					return half4(debugColor, 1.0h);
+				}
 
 				// ---- §6.3 外环混合带（水平 XZ 距离）----
-				float2 camLocalXZ = _WorldSpaceCameraPos.xz - _TerrainOrigin.xz;
-				float  r = length(localXZ - camLocalXZ);
 
 				float4 albedo4;
 				float4 na;   // 混合后的 NormalAttr（§4.1：RG=法线XY，B=粗糙度，A=AO）
@@ -200,12 +230,12 @@ Shader "MT/TerrainClipmap"
 					}
 				}
 
-				// ---- 解码（§4.1 NormalAttr：RG=法线XY，B=粗糙度，A=AO；Metallic 恒 0 不占通道）----
+				// ---- 解码：Albedo.A=Metallic；NormalAttr RG=法线XY，B=粗糙度，A=AO ----
 				half3 albedo = albedo4.rgb;
 				half roughness  = na.b;
 				half occlusion  = na.a;
 				half smoothness = 1.0h - roughness;
-				half metallic   = 0.0h;
+				half metallic   = albedo4.a * _ClipPackedMaterial;
 
 				// ---- URP PBR（复用插件的切线框架构造）----
 				float3 normalWS = SafeNormalize(IN.normalWS);
