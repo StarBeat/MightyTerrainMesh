@@ -21,6 +21,7 @@ namespace MightyTerrainMesh
         public int mode;
         public int layer;           // 采样目标层（8 = L8 静态层）
         public bool albedo;         // true=albedo，false=normalAttr
+        public int channelMask;     // §4.1 材质通道位掩码：bit0 金属度 / bit1 AO / bit2 光滑度（0 位 = 不采样写常量）
         public float2 worldMin;     // 条带区域世界最小角（世界坐标，含 TerrainOrigin）
         public float texel;         // 世界米/texel
 
@@ -168,14 +169,18 @@ namespace MightyTerrainMesh
             int aBase = AlphaBase(w);
             float3 rgb = float3.zero;
             float metallic = 0;
+            bool useMetallic = (channelMask & 1) != 0;
             for (int l = 0; l < 8 && l < alphaLayers; ++l)
             {
                 float weight = alphamaps[aBase + l];
                 if (weight < 0.003f) continue;
                 float4 diffuse = LayerTexel(l, w, 0, new float4(0.5f, 0.5f, 0.5f, 1f));
-                float4 mask = LayerTexel(l, w, 2, new float4(LayerMetallic(l), 1f, 0f, 0f));
                 rgb += diffuse.xyz * weight;
-                metallic += mask.x * weight;
+                if (useMetallic) // mask.R = 金属度；通道关闭时跳过采样，albedo.A 恒 0
+                {
+                    float4 mask = LayerTexel(l, w, 2, new float4(LayerMetallic(l), 1f, 0f, 0f));
+                    metallic += mask.x * weight;
+                }
             }
             return new float4(rgb, metallic);
         }
@@ -306,6 +311,7 @@ namespace MightyTerrainMesh
             int aBase = AlphaBase(w);
             float3 detailNormal = float3.zero;
             float smoothness = 0, occlusion = 0;
+            bool useAO = (channelMask & 2) != 0, useSmooth = (channelMask & 4) != 0;
             for (int l = 0; l < 8 && l < alphaLayers; ++l)
             {
                 float weight = alphamaps[aBase + l];
@@ -315,19 +321,23 @@ namespace MightyTerrainMesh
                 float z = math.sqrt(math.saturate(1f - math.dot(xy, xy)));
                 detailNormal += new float3(xy, z) * weight;
 
-                float4 diffuse = LayerTexel(l, w, 0, new float4(0.5f, 0.5f, 0.5f, 1f));
-                float defaultSmoothness = diffuse.w * LayerSmoothness(l);
-                float4 mask = LayerTexel(l, w, 2, new float4(LayerMetallic(l), 1f, 0f, defaultSmoothness));
-                smoothness += mask.w * weight;
-                occlusion += mask.y * weight;
+                if (useAO || useSmooth) // mask.G = AO、mask.A = 光滑度；两通道全关时跳过采样
+                {
+                    float4 diffuse = LayerTexel(l, w, 0, new float4(0.5f, 0.5f, 0.5f, 1f));
+                    float defaultSmoothness = diffuse.w * LayerSmoothness(l);
+                    float4 mask = LayerTexel(l, w, 2, new float4(LayerMetallic(l), 1f, 0f, defaultSmoothness));
+                    if (useSmooth) smoothness += mask.w * weight;
+                    if (useAO) occlusion += mask.y * weight;
+                }
             }
             detailNormal.z += 1e-5f;
             detailNormal = math.normalize(detailNormal);
             float3 combined = math.normalize(new float3(
                 heightNormal.xy + detailNormal.xy,
                 heightNormal.z * detailNormal.z));
+            // 关闭的通道写中性常量：粗糙度 0.5、AO 1（与 shader 关键字替代的常量一致）
             return new float4(combined.x * 0.5f + 0.5f, combined.y * 0.5f + 0.5f,
-                1f - smoothness, occlusion);
+                useSmooth ? 1f - smoothness : 0.5f, useAO ? occlusion : 1f);
         }
 
         float HeightAt(float2 w)

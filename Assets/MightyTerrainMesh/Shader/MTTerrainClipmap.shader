@@ -38,6 +38,13 @@ Shader "MT/TerrainClipmap"
 			#pragma multi_compile_fog
 			#pragma multi_compile_instancing
 
+			// 材质通道开关：manifest.channelMask 关闭的通道烘焙期写常量，运行时由
+			// MTClipmapController 按 mask 设材质关键字。multi_compile 不用 shader_feature：
+			// 关键字仅运行时代码开启，shader_feature 会在 player 打包时裁掉这些变体
+			#pragma multi_compile _ _CLIP_NO_METALLIC
+			#pragma multi_compile _ _CLIP_NO_AO
+			#pragma multi_compile _ _CLIP_NO_SMOOTHNESS
+
 			#include "Packages/com.unity.render-pipelines.universal/ShaderLibrary/Core.hlsl"
 			#include "Packages/com.unity.render-pipelines.core/ShaderLibrary/CommonMaterial.hlsl"
 			#include "Packages/com.unity.render-pipelines.universal/ShaderLibrary/SurfaceInput.hlsl"
@@ -51,10 +58,10 @@ Shader "MT/TerrainClipmap"
 
 			float4 _TerrainOrigin;      // xz = 地形世界原点
 			float  _TerrainSize;        // 默认 8192
-			float  _ClipBaseFootprint;  // 32
+			float  _ClipBaseFootprint;  // L0 footprint（默认 32；splat 密度对齐烘焙时以 manifest 为准）
 			float  _ClipLayerRes;       // 层分辨率（选层偏移与之联动）
 			int    _ClipValidMask;      // §6.5 驻留掩码：bit k = 环面层 k 有效，bit K = 静态层恒有效
-			int    _ClipLevelCount;     // §3.1.1 动态层数 K = log2(S)−5（静态层 = L_K）
+			int    _ClipLevelCount;     // §3.1.1 动态层数 K = ceil(log2(S/_ClipBaseFootprint))（静态层 = L_K）
 			float  _ClipBlendStart;     // §6.2/§8.1 外环混合带起点（占 footprint 半径比例，默认 0.75，门闸降级①调至 0.80）
 			float3 _ClipViewCameraPos;  // 固定的主相机位置，Scene 窗口不使用 Scene 相机替代
 			int    _ClipDebugLOD;       // 0：关闭；1：请求层（足迹与距离取 max）；2：包含驻留回退
@@ -100,7 +107,7 @@ Shader "MT/TerrainClipmap"
 				return o;
 			}
 
-			float ClipFootprint(int k) { return _ClipBaseFootprint * exp2((float)k); } // 32·2^k 米
+			float ClipFootprint(int k) { return _ClipBaseFootprint * exp2((float)k); } // base·2^k 米
 
 			// §6.5：从 k 向上找第一个已驻留层（瓦片未到位时采样时降级，支持非连续失效；bit K 恒有效保证收敛）
 			int FinestValidLevel(int k)
@@ -231,11 +238,23 @@ Shader "MT/TerrainClipmap"
 				}
 
 				// ---- 解码：Albedo.A=Metallic；NormalAttr RG=法线XY，B=粗糙度，A=AO ----
+				// 通道由 manifest.channelMask 决定是否烘焙；关闭的通道烘焙期为常量，这里直接用常量
 				half3 albedo = albedo4.rgb;
-				half roughness  = na.b;
-				half occlusion  = na.a;
-				half smoothness = 1.0h - roughness;
-				half metallic   = albedo4.a * _ClipPackedMaterial;
+#if defined(_CLIP_NO_METALLIC)
+				half metallic = 0.0h;
+#else
+				half metallic = albedo4.a * _ClipPackedMaterial;
+#endif
+#if defined(_CLIP_NO_SMOOTHNESS)
+				half smoothness = 0.5h;
+#else
+				half smoothness = 1.0h - na.b;
+#endif
+#if defined(_CLIP_NO_AO)
+				half occlusion = 1.0h;
+#else
+				half occlusion = na.a;
+#endif
 
 				// ---- URP PBR（复用插件的切线框架构造）----
 				float3 normalWS = SafeNormalize(IN.normalWS);

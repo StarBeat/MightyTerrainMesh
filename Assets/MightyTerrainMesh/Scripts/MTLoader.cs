@@ -1,4 +1,4 @@
-﻿namespace MightyTerrainMesh
+namespace MightyTerrainMesh
 {
     using System;
     using System.IO;
@@ -44,14 +44,23 @@
             }
         }
         private MTData rawData;
-        private Dictionary<int, MTRenderMesh> parsedMesh = new Dictionary<int, MTRenderMesh>();
+        private class MeshEntry
+        {
+            public MTRenderMesh mesh;
+            public int lastUsedFrame;
+        }
+        private Dictionary<int, MeshEntry> parsedMesh = new Dictionary<int, MeshEntry>();
         //memory data cache, once all data parsed into mesh, it will be destroied
         private Dictionary<string, MeshStreamCache> dataStreams = new Dictionary<string, MeshStreamCache>();
         private IMeshDataLoader loader;
-        public MTRuntimeMeshPool(MTData data, IMeshDataLoader ld)
+        private readonly Func<int, bool> inUse; // 活跃 patch 判定（驱逐保护）
+        private readonly int capacity;
+        public MTRuntimeMeshPool(MTData data, IMeshDataLoader ld, Func<int, bool> inUsePred = null, int capacity = 1024)
         {
             rawData = data;
             loader = ld;
+            inUse = inUsePred;
+            this.capacity = Mathf.Max(64, capacity);
         }
         public MTRenderMesh PopMesh(int meshId)
         {
@@ -67,7 +76,8 @@
                 }
                 var streamCache = dataStreams[path];
                 var rm = streamCache.GetMesh(meshId);
-                parsedMesh.Add(meshId, rm);
+                parsedMesh.Add(meshId, new MeshEntry { mesh = rm, lastUsedFrame = Time.frameCount });
+                if (parsedMesh.Count > capacity) EvictLRU(); // roaming 大地形防无限增长
                 if (streamCache.Obseleted)
                 {
                     dataStreams.Remove(streamCache.Path);
@@ -75,11 +85,27 @@
                     streamCache.Clear();
                 }
             }
-            if (parsedMesh.ContainsKey(meshId))
+            if (parsedMesh.TryGetValue(meshId, out var e))
             {
-                return parsedMesh[meshId];
+                e.lastUsedFrame = Time.frameCount;
+                return e.mesh;
             }
             return null;
+        }
+        /// <summary>淘汰最久未用的已解析 mesh（活跃 patch 跳过；全部活跃时暂时超支）。</summary>
+        private void EvictLRU()
+        {
+            int victimKey = -1;
+            int best = int.MaxValue;
+            MeshEntry victim = null;
+            foreach (var kv in parsedMesh)
+            {
+                if (inUse != null && inUse(kv.Key)) continue;
+                if (kv.Value.lastUsedFrame < best) { best = kv.Value.lastUsedFrame; victim = kv.Value; victimKey = kv.Key; }
+            }
+            if (victim == null) return;
+            victim.mesh.Clear();
+            parsedMesh.Remove(victimKey);
         }
         public void Clear()
         {
@@ -91,7 +117,7 @@
             dataStreams.Clear();
             foreach (var m in parsedMesh.Values)
             {
-                m.Clear();
+                m.mesh.Clear();
             }
             parsedMesh.Clear();
         }
@@ -106,6 +132,8 @@
         public bool receiveShadow = true;
         public float detailDrawDistance = 80;
         public bool showDebug = false;
+        [Tooltip("已解析 mesh 的缓存上限（个，LRU 淘汰，活跃 patch 不驱逐）；roaming 大地形时防内存无限增长")]
+        public int meshCacheCapacity = 1024;
         //
         private MTRuntimeMeshPool meshPool;
         private MTQuadTreeUtil quadtree;
@@ -139,7 +167,7 @@
             heightMap = new MTHeightMap(quadtree.Bound, header.HeightmapResolution, header.HeightmapScale, header.HeightMap.bytes);
             activeCmd = new MTArray<MTQuadTreeNode>(quadtree.NodeCount);
             deactiveCmd = new MTArray<MTQuadTreeNode>(quadtree.NodeCount);
-            meshPool = new MTRuntimeMeshPool(header, loader);
+            meshPool = new MTRuntimeMeshPool(header, loader, idx => activeMeshes.ContainsKey(idx), meshCacheCapacity);
             vtCreator = VTCreatorGo.GetComponent<IVTCreator>();
             detailRenderer = new MTDetailRenderer(header, quadtree.Bound, receiveShadow);
             prevWorld2Cam = Matrix4x4.identity;

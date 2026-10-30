@@ -35,11 +35,16 @@ namespace MightyTerrainMesh.EditorTools
         private bool _bakeClipmap = true;
         private int _l7Res = 512;
         private int _l8Res = 2040;
-        private MTTerrainBakePipeline.ClipmapBakeFormat _bakeFormat = MTTerrainBakePipeline.ClipmapBakeFormat.ASTC;
+        private MTTerrainBakePipeline.ClipmapBakeFormat _bakeFormat = MTTerrainBakePipeline.ClipmapBakeFormat.Auto;
         private TextureCompressionQuality _fineQuality = TextureCompressionQuality.Fast;
         private bool _bakePyramid = true;
         private bool _pyramidFull = false; // D8：默认区域高精包（regions 内 L0 高精，粗级全量）
         private int _coarseFullFrom = 3;   // 粗级全量起始级（j≥此级全网格直接烘焙）
+        private bool _customL0Density = false;      // 自定义 L0 纹素密度（footprint 保持 32m 契约，反推分辨率）
+        private float _l0TexelCm = 1.57f;           // L0 纹素密度（厘米/像素），默认 1.57 ≡ 2040²
+        private bool _chMetallic = true;            // 材质通道：金属度（Albedo.A）
+        private bool _chAO = true;                  // 材质通道：AO（NormalAttr.A）
+        private bool _chSmoothness = true;          // 材质通道：光滑度（NormalAttr.B）
         private List<Rect> _regions = new List<Rect>();
 
         // ---- 输出目录 ----
@@ -131,28 +136,56 @@ namespace MightyTerrainMesh.EditorTools
                 if (_terrain != null)
                 {
                     float ts = _terrain.terrainData.size.x;
-                    int k = Mathf.Max(1, Mathf.RoundToInt(Mathf.Log(Mathf.Max(32f, ts), 2f)) - 5);
+                    int k = Mathf.Max(1, Mathf.CeilToInt(Mathf.Log(ts / 32f, 2f) - 1e-3f));
+                    int l0Res = EffectiveTileRes();
                     EditorGUILayout.LabelField(
                         $"§3.1.1：K={k}（环面 L0..L{k - 1} + 静态层 L{k}），静态层 texel {ts / _l8Res:F3} m" +
-                        $"（契约 S/2040），L0 层 1.57cm（32m/2040）",
+                        $"（契约 S/2040），L0 层 {3200f / l0Res:F2}cm（32m/{l0Res}）",
                         EditorStyles.miniLabel);
                     if (GUILayout.Button("重新按地形计算"))
                         MTTerrainBakePipeline.RecommendClipmapResolutions(ts, out _l7Res, out _l8Res);
                 }
                 _bakeFormat = (MTTerrainBakePipeline.ClipmapBakeFormat)EditorGUILayout.EnumPopup(
-                    new GUIContent("压缩格式（§10）", "ASTC=移动端；BC7=DX/桌面；RGBA32=未压缩。目标平台必须支持所选格式。" +
-                        "ASTC/BC7 分别可由 astcenc/Compressonator 外部编码器并行加速（MightyTerrainMesh 菜单下载）"),
+                    new GUIContent("压缩模式（§10）", "产物为 PNG 源图，实际压缩由导入管线按平台完成：\n" +
+                        "Auto = Standalone BC7 / 移动端 ASTC 6x6/5x5（推荐）；\n" +
+                        "ASTC/BC7 = 全平台强制（目标平台须支持）；RGBA32 = 不压缩（联调）"),
                     _bakeFormat);
                 _fineQuality = (TextureCompressionQuality)EditorGUILayout.EnumPopup(
-                    new GUIContent("L0 压缩质量", "ASTC 压缩耗时大头：Fast ≈ Normal 的 1/4~1/6；最终资产可换 Normal 重烘（≥L1 恒为 Fast）"),
+                    new GUIContent("导入压缩质量", "写入 manifest，导入器平台覆盖的 compressionQuality。BC7 Best 极慢，建议 Fast/Normal"),
                     _fineQuality);
+                EditorGUILayout.LabelField("材质通道（关闭的通道不烘焙，shader 用常量替代）", EditorStyles.miniBoldLabel);
+                EditorGUI.indentLevel++;
+                _chMetallic = EditorGUILayout.ToggleLeft("金属度（Albedo.A，关闭恒 0）", _chMetallic);
+                _chAO = EditorGUILayout.ToggleLeft("环境光遮蔽 AO（NormalAttr.A，关闭恒 1）", _chAO);
+                _chSmoothness = EditorGUILayout.ToggleLeft("光滑度（NormalAttr.B，关闭恒 0.5）", _chSmoothness);
+                EditorGUI.indentLevel--;
                 _bakePyramid = EditorGUILayout.ToggleLeft(
-                    "瓦片金字塔（§7.1 流式契约：L0 = 32m@2040²，运行时异步流式 + 直拷）", _bakePyramid);
+                    "瓦片金字塔（§7.1 流式契约：默认 L0 = 32m@2040²，可对齐 splat 密度；运行时异步流式 + 直拷）", _bakePyramid);
                 if (_bakePyramid && _terrain != null)
                 {
                     EditorGUI.indentLevel++;
+                    _customL0Density = EditorGUILayout.ToggleLeft(
+                        new GUIContent("自定义 L0 纹素密度", "L0 footprint 保持 32m 契约，分辨率 = 3200 / 密度（cm/px），" +
+                            "按 60 对齐（ASTC/BC7 块对齐）并钳制到 [60, 4096]；最细可达 ≈0.78cm（4096²）"),
+                        _customL0Density);
+                    if (_customL0Density)
+                    {
+                        EditorGUI.indentLevel++;
+                        _l0TexelCm = EditorGUILayout.Slider(
+                            new GUIContent("L0 纹素密度 (cm/像素)", "每个 L0 texel 覆盖的地面尺寸（厘米）。参考最细 splat 层密度，低于它无意义"),
+                            _l0TexelCm, 0.5f, 8f);
+                        float st = MTTerrainBakePipeline.FinestSplatTexelSize(_terrain);
+                        int r0 = EffectiveTileRes();
+                        float achieved = 3200f / r0;
+                        EditorGUILayout.LabelField(
+                            $"→ L0 32m@{r0}²（实际 texel {achieved:F2}cm）" +
+                            (Mathf.Abs(achieved - _l0TexelCm) > 0.01f ? "（块对齐/4096² 上限截断）" : "") +
+                            (st > 0f ? $"；最细 splat texel {st * 100f:F2}cm" : ""),
+                            EditorStyles.miniLabel);
+                        EditorGUI.indentLevel--;
+                    }
                     _pyramidFull = EditorGUILayout.ToggleLeft(
-                        new GUIContent("全区域覆盖（警告：2040² 片 ≈4.5MB(ASTC)，1024m 全量 ≈6GB；D8 建议关闭走区域包）", ""),
+                        new GUIContent("全区域覆盖（警告：2040² 全量片数多、PNG 源体积大；D8 建议关闭走区域包）", ""),
                         _pyramidFull);
                     if (!_pyramidFull)
                         _coarseFullFrom = EditorGUILayout.IntSlider(
@@ -162,10 +195,17 @@ namespace MightyTerrainMesh.EditorTools
                     foreach (var r in _regions) regionArea += r.width * r.height;
                     MTTerrainBakePipeline.EstimatePyramid(_terrain.terrainData.size.x, 32f,
                         _pyramidFull, regionArea, _coarseFullFrom, out int plv, out long pt);
-                    float mbPerTile = _bakeFormat == MTTerrainBakePipeline.ClipmapBakeFormat.ASTC ? 4.5f
-                        : _bakeFormat == MTTerrainBakePipeline.ClipmapBakeFormat.BC7 ? 8.3f : 33.3f;
+                    int effRes = EffectiveTileRes();
+                    double texels = effRes * (double)effRes; // 每片一对 albedo+normal 的 texel 数基数
+                    double bc7Mb = texels * 2.0 / (1024 * 1024);
+                    double astcMb = texels * (16.0 / 36.0 + 16.0 / 25.0) / (1024 * 1024);
+                    double rgbaMb = texels * 8.0 / (1024 * 1024);
+                    string sizeHint = _bakeFormat == MTTerrainBakePipeline.ClipmapBakeFormat.RGBA32 ? $"{rgbaMb:F1}MB/片"
+                        : _bakeFormat == MTTerrainBakePipeline.ClipmapBakeFormat.BC7 ? $"{bc7Mb:F1}MB/片"
+                        : _bakeFormat == MTTerrainBakePipeline.ClipmapBakeFormat.ASTC ? $"{astcMb:F1}MB/片"
+                        : $"{bc7Mb:F1}MB(PC)/{astcMb:F1}MB(移动) 每片";
                     EditorGUILayout.LabelField(
-                        $"金字塔：{plv} 级，约 {pt} 片 × {mbPerTile:F1}MB ≈ {pt * mbPerTile / 1024f:F2}GB（{_bakeFormat}）",
+                        $"金字塔：{plv} 级，约 {pt} 片；PNG 源 ≈ {pt * 10f * texels / (2040.0 * 2040.0) / 1024f:F1}GB（不入库），包体压缩后 {sizeHint}",
                         EditorStyles.miniLabel);
                     EditorGUI.indentLevel--;
                 }
@@ -200,7 +240,7 @@ namespace MightyTerrainMesh.EditorTools
                 EditorGUILayout.HelpBox(
                     $"MTData  →  {_mtDataRoot}/{_terrain.name}/\n" +
                     $"Mesh    →  {_meshDataDir}/{_terrain.name}_*.bytes" +
-                    (_bakeClipmap ? $"\nClipmap →  {_clipmapDir}/（manifest + l7/l8/block）" : ""),
+                    (_bakeClipmap ? $"\nClipmap →  {_clipmapDir}/（manifest + l7/l8 + tiles/*.png，导入时按平台压缩）" : ""),
                     MessageType.None);
 
             // ---------------- 场景布置 ----------------
@@ -246,7 +286,8 @@ namespace MightyTerrainMesh.EditorTools
             // ② Clipmap 纹理
             if (_bakeClipmap)
                 MTTerrainBakePipeline.BakeClipmap(_terrain, _l7Res, _l8Res, _bakeFormat, _clipmapDir,
-                    _regions, _bakePyramid, _pyramidFull, _coarseFullFrom, _fineQuality);
+                    _regions, _bakePyramid, _pyramidFull, _coarseFullFrom, _fineQuality,
+                    _customL0Density ? _l0TexelCm : 0f, ChannelMask());
 
             // ③ 场景布置
             if (_placeInScene)
@@ -282,6 +323,17 @@ namespace MightyTerrainMesh.EditorTools
                 return false;
             }
             return true;
+        }
+
+        /// <summary>材质通道位掩码：bit0 金属度 / bit1 AO / bit2 光滑度。</summary>
+        int ChannelMask() => (_chMetallic ? 1 : 0) | (_chAO ? 2 : 0) | (_chSmoothness ? 4 : 0);
+
+        /// <summary>当前生效的金字塔 L0 分辨率：自定义密度开启时由 3200/texelCm 反推（footprint 恒为 32m），否则契约默认 2040。</summary>
+        int EffectiveTileRes()
+        {
+            if (!_customL0Density || _terrain == null)
+                return 2040;
+            return MTTerrainBakePipeline.L0TileResForTexelCm(_l0TexelCm);
         }
 
         /// <summary>"Assets/.../Resources/ClipmapBaked" → "ClipmapBaked"（Resources.Load 相对路径）。</summary>

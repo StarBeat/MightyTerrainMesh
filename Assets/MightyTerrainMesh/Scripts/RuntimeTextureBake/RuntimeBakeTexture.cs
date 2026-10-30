@@ -1,4 +1,4 @@
-﻿namespace MightyTerrainMesh
+namespace MightyTerrainMesh
 {
     using System.Collections;
     using System.Collections.Generic;
@@ -114,8 +114,11 @@
                 RTT = null;
             }
             layers = null;
-            cmdBuffer.Clear();
-            cmdBuffer = null;
+            if (cmdBuffer != null)
+            {
+                cmdBuffer.Dispose(); // CommandBuffer 有 native 侧资源，仅 Clear 会泄漏到 GC finalizer
+                cmdBuffer = null;
+            }
         }
     }
 

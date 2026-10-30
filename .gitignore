@@ -21,3 +21,7 @@ UnityEngine.UI.csproj
 # ClipmapVT 烘焙产物（tiles.bin 单文件超 Git 100MB 限制，可重新烘焙生成）
 Assets/StreamingAssets/
 Assets/StreamingAssets.meta
+
+# ClipmapVT v3 烘焙产物（PNG 源图，体积大且可重烘生成；导入设置由 MTClipmapBakedImporter 自动配置）
+Assets/Resources/ClipmapBaked/
+Assets/Resources/ClipmapBaked.meta

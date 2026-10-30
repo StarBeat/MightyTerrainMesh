@@ -10,14 +10,16 @@ namespace MightyTerrainMesh
     /// <summary>
     /// ClipmapVT 控制器 v6（对齐 ClipmapVT.md v2.5 §3.1/§5/§6.5/§7.1/§8.1/§10）：
     /// - 层分辨率 2040 = 68×30 = 340×6 = 408×5（ASTC 6x6/5x5 与 BC7 4×4(Q=60) 均块对齐，§3.1）；
-    /// - 动态层数 K = log2(S)−5（§3.1.1：1024m→K=5 环面 L0..L4 + 静态层 L5 覆盖全地形 @2040²，
+    /// - 动态层数 K = ceil(log2(S/baseFootprint))（§3.1.1 推广：默认 base=32m 即 K = log2(S)−5，
+    ///   1024m→K=5 环面 L0..L4 + 静态层 L5 覆盖全地形 @2040²，
     ///   texel = S/2040，离线完整 Mip 链）；shader 端 _ClipLevelCount 全局同步；
     /// - 固定图集寻址：采样 uv = frac(localXZ / footprint_k)，origin 仅作更新簿记；
     /// - 更新量子 Q：ASTC=30 / BC7=60（§5.1）；条带矩形由 Q 对齐性自动块对齐；
     /// - 直拷模式（Baked + 金字塔）：烘焙 texel ≡ 环面 texel（1:1），更新 = 纯矩形簿记 +
     ///   Graphics.CopyTexture（ASTC/BC7 压缩直拷），CPU 零逐像素工作；
-    /// - 环面格式三档（§10/D12）：ASTC 6x6/5x5（移动端）/ BC7（DX/桌面）/ RGBA32，
-    ///   直接使用 manifest 声明格式，目标平台须支持；
+    /// - 环面格式（§10/D12）：= 烘焙瓦片资产的平台压缩格式（导入器按 manifest.formatMode 配置：
+    ///   Auto → Standalone BC7 / 移动端 ASTC 6x6/5x5；另有全平台强制与 RGBA32 联调档），
+    ///   运行时探针顶级瓦片（L8 兜底）读取实际格式，CopyTexture 要求环面与瓦片同格式自动满足；
     /// - 瓦片未到位 → 不写入兜底内容，shader 按驻留掩码 _ClipValidMask 逐层向上扫描（§6.5，
     ///   支持非连续层失效；粗级全量烘焙保证收敛，静态层恒有效）；
     /// - 带宽门闸（§8.1）：帧时 EMA 持续超预算 → ① 混合带 25%→20%（_ClipBlendStart 0.75→0.80）
@@ -47,7 +49,7 @@ namespace MightyTerrainMesh
         [Header("Clipmap 参数")]
         [Tooltip("层分辨率（§3.1：2040 = 68×30，ASTC/BC7 均块对齐）。烘焙金字塔存在时自动以 manifest 为准")]
         public int layerResolution = 2040;
-        [Tooltip("L0 层 footprint（米，§3.1：32m → L0 texel 1.57cm）。烘焙金字塔存在时自动以 manifest 为准")]
+        [Tooltip("L0 层 footprint（米，§3.1：默认 32m → L0 texel 1.57cm；splat 密度对齐烘焙时以 manifest 为准）。烘焙金字塔存在时自动以 manifest 为准")]
         public float baseFootprint = 32f;
         /// <summary>层数上限（8192m 地形）；运行时层数 K = log2(S)−5，见 _levelCount。</summary>
         public const int MaxLevelCount = 8;
@@ -77,6 +79,8 @@ namespace MightyTerrainMesh
         [Header("调试")]
         [Tooltip("按 viewCamera 的选层结果显示（像素足迹与距离取 max），不受 Scene 相机影响；Requested：请求 LOD；Actual：包含瓦片未驻留时的粗层回退")]
         public DebugLodMode debugLodMode = DebugLodMode.Requested;
+        [Tooltip("Scene 视图绘制 clipmap 区块：各层环面窗口（色相按层级，半透明 = 层失效重填中）、混合带内框、静态层全地形外框")]
+        public bool showGizmos = true;
 
         private enum StripKind { Col, Row, Full }
 
@@ -91,6 +95,7 @@ namespace MightyTerrainMesh
 
         private Texture2DArray _albedoArray, _normalArray;
         private Texture2D _albedoL8, _normalL8;
+        private bool _l8AssetA, _l8AssetN; // 烘焙模式下 L8 是 Resources 资产（只能 UnloadAsset，不能 Destroy）
         // staging 分级：竖条带 chunk×res / 横条带 res×chunk / 整层 res×res（§8.2 上传带宽）
         private Texture2D _stgColA, _stgColN, _stgRowA, _stgRowN, _stgFullA, _stgFullN;
         private Vector2[] _origins;      // [_levelCount]，Awake 分配
@@ -148,13 +153,16 @@ namespace MightyTerrainMesh
                 baseFootprint = _source.TileWorld0;
             }
 
-            // 动态层数 K = log2(S)−5（§3.1.1）：S=1024 → K=5（环面 L0..L4 + 静态层 L5）
+            // 动态层数 K = ceil(log2(S/baseFootprint))（§3.1.1 推广：默认 base=32m 时即 K = log2(S)−5，
+            // 1024m→K=5 环面 L0..L4 + 静态层 L5 覆盖全地形 @2040²；splat 密度对齐烘焙后 base 以 manifest 为准）。
+            // Ceil 保证顶层环面 footprint(K−1) ≥ S/2（覆盖要求）；2 幂边界用 epsilon 防止浮点误差多出一层
             int log2s = Mathf.RoundToInt(Mathf.Log(Mathf.Max(32f, terrainSize), 2f));
             if (Mathf.Abs(terrainSize - (1 << log2s)) > 0.5f)
                 Debug.LogWarning($"[MTClipmap] 地形尺寸 {terrainSize}m 非 2 幂，层数按最近 2 幂估算（§3.1.1 契约建议 1024/2048/4096）");
-            _levelCount = Mathf.Clamp(log2s - 5, 1, MaxLevelCount);
-            if (log2s - 5 > MaxLevelCount)
-                Debug.LogWarning($"[MTClipmap] 地形 {terrainSize}m 所需层数 K={log2s - 5} 超上限 {MaxLevelCount}，已截断——顶层环面覆盖不足区域由静态层兜底（采样密度降低，功能正确）");
+            int kFull = Mathf.Max(1, Mathf.CeilToInt(Mathf.Log(terrainSize / baseFootprint, 2f) - 1e-3f));
+            _levelCount = Mathf.Clamp(kFull, 1, MaxLevelCount);
+            if (kFull > MaxLevelCount)
+                Debug.LogWarning($"[MTClipmap] 地形 {terrainSize}m 所需层数 K={kFull} 超上限 {MaxLevelCount}，已截断——顶层环面覆盖不足区域由静态层兜底（采样密度降低，功能正确）");
             _origins = new Vector2[_levelCount];
             _prevOrigins = new Vector2[_levelCount];
             _layerValid = new bool[_levelCount];
@@ -172,7 +180,7 @@ namespace MightyTerrainMesh
             _effectiveQ = _ringFmtA == TextureFormat.BC7 ? 60 : updateQuantumTexels; // §5.1：BC7 4×4 块 → Q=60
             _blockA = _ringFmtA == TextureFormat.ASTC_6x6 ? 6 : _ringFmtA == TextureFormat.BC7 ? 4 : 1;
             _blockN = _ringFmtN == TextureFormat.ASTC_5x5 ? 5 : _ringFmtN == TextureFormat.BC7 ? 4 : 1;
-            _bptPair = BytesPerTexel(_ringFmtA) + BytesPerTexel(_ringFmtN);
+            _bptPair = ClipmapSourceRuntime.BytesPerTexel(_ringFmtA) + ClipmapSourceRuntime.BytesPerTexel(_ringFmtN);
 
             // 块对齐：层分辨率与条带分块必须为 Q 的倍数（所有条带矩形自动块对齐）；
             // Job 回退路径（Terrain/Test/旧烘焙）上限 1020，控制 staging/环面内存
@@ -184,6 +192,11 @@ namespace MightyTerrainMesh
             var shader = Shader.Find("MT/TerrainClipmap");
 
             ClipmapMaterial = new Material(shader);
+            // 材质通道关键字：manifest channelMask 关闭的通道由 shader 常量替代（烘焙期已写中性值，
+            // Job 不再采样 mask）；用 multi_compile 变体，打包不裁剪
+            SetChannelKeyword(ClipmapMaterial, "_CLIP_NO_METALLIC", (_source.ChannelMask & 1) == 0);
+            SetChannelKeyword(ClipmapMaterial, "_CLIP_NO_AO", (_source.ChannelMask & 2) == 0);
+            SetChannelKeyword(ClipmapMaterial, "_CLIP_NO_SMOOTHNESS", (_source.ChannelMask & 4) == 0);
             Shader.SetGlobalVector("_TerrainOrigin", new Vector4(terrainOriginXZ.x, 0, terrainOriginXZ.y, 0));
             Shader.SetGlobalFloat("_TerrainSize", terrainSize);
             Shader.SetGlobalFloat("_ClipBaseFootprint", baseFootprint);
@@ -197,15 +210,13 @@ namespace MightyTerrainMesh
             // 关闭原 VT 系统，避免冲突
             foreach (var vt in FindObjectsOfType<MTVTCreator>()) vt.enabled = false;
 
-            // L8 静态层按 manifest 的原始格式直接上传。
+            // L8 静态层：烘焙 PNG 资产（导入器已按平台压缩 + 生成完整 mip 链），直接使用。
             if (_source.Mode == ClipmapStripJob.MODE_BAKED)
             {
-                var a = ClipmapSourceRuntime.LoadBakedTexture(bakedResourcesRoot + "/l8_albedo", true, true,
-                    _source.L8Res, _source.L8Res, _source.BakedTexFormatA);
-                var n = ClipmapSourceRuntime.LoadBakedTexture(bakedResourcesRoot + "/l8_normal", false, true,
-                    _source.L8Res, _source.L8Res, _source.BakedTexFormatN);
-                if (a != null) { Destroy(_albedoL8); _albedoL8 = a; }
-                if (n != null) { Destroy(_normalL8); _normalL8 = n; }
+                var a = Resources.Load<Texture2D>(bakedResourcesRoot + "/l8_albedo");
+                var n = Resources.Load<Texture2D>(bakedResourcesRoot + "/l8_normal");
+                if (a != null) { Destroy(_albedoL8); _albedoL8 = a; _l8AssetA = true; }
+                if (n != null) { Destroy(_normalL8); _normalL8 = n; _l8AssetN = true; }
                 SetupL8Sampler(_albedoL8);
                 SetupL8Sampler(_normalL8);
             }
@@ -232,9 +243,12 @@ namespace MightyTerrainMesh
             Shader.SetGlobalInt("_ClipDebugLOD", 0);
             _source?.Dispose();
             if (ClipmapMaterial != null) Destroy(ClipmapMaterial);
-            foreach (var t in new Object[] { _albedoArray, _normalArray, _albedoL8, _normalL8,
+            // 环面/staging 均为运行时创建，正常 Destroy；烘焙模式的 L8 是 Resources 资产，只能 UnloadAsset
+            foreach (var t in new Object[] { _albedoArray, _normalArray,
                                              _stgColA, _stgColN, _stgRowA, _stgRowN, _stgFullA, _stgFullN })
                 if (t != null) Destroy(t);
+            if (_albedoL8 != null) { if (_l8AssetA) Resources.UnloadAsset(_albedoL8); else Destroy(_albedoL8); }
+            if (_normalL8 != null) { if (_l8AssetN) Resources.UnloadAsset(_normalL8); else Destroy(_normalL8); }
         }
 
         // ---------------------------------------------------------
@@ -348,6 +362,11 @@ namespace MightyTerrainMesh
         float Texel(int k) => Footprint(k) / layerResolution;
         float QWorld(int k) => _effectiveQ * Texel(k); // §5.1：Q_world_k = Q·texel_k（ASTC Q=30 / BC7 Q=60）
 
+        static void SetChannelKeyword(Material m, string keyword, bool off)
+        {
+            if (off) m.EnableKeyword(keyword); else m.DisableKeyword(keyword);
+        }
+
         // ---------------- 带宽门闸（§8.1 降级序列） ----------------
 
         void TickGovernor()
@@ -421,18 +440,6 @@ namespace MightyTerrainMesh
         {
             _layerValid[k] = false;
             _refillRow[k] = 0;
-        }
-
-        /// <summary>各环面格式的每 texel 字节数（§4.2 存储常数）。</summary>
-        static double BytesPerTexel(TextureFormat f)
-        {
-            switch (f)
-            {
-                case TextureFormat.ASTC_6x6: return 16.0 / 36.0;
-                case TextureFormat.ASTC_5x5: return 16.0 / 25.0;
-                case TextureFormat.BC7: return 1.0;
-                default: return 4.0;
-            }
         }
 
         /// <summary>字节预算内的重附带高（行数，吸附 Q 网格保证 dst 块对齐；≤0 表示预算不足）。</summary>
@@ -663,7 +670,12 @@ namespace MightyTerrainMesh
                 int dz = op.dst.y + Mathf.RoundToInt((iz0 - op.worldMin.y) / texel);
                 int cw = Mathf.RoundToInt((ix1 - ix0) / texel);
                 int ch = Mathf.RoundToInt((iz1 - iz0) / texel);
-                // 压缩直拷需块对齐（res=2040 与 Q 已保证对齐；仅地形边缘钳制等异常会触发）
+                // 地形边缘钳制会破坏 origin 的 Q 对齐，产生分数 texel 偏移，RoundToInt 可能越出
+                // 纹理边界（sz=res）：源/目标矩形同步钳制进 [0,res]，内容对齐关系保持不变
+                ClampCopyRect(ref sx, ref dx, ref cw);
+                ClampCopyRect(ref sz, ref dz, ref ch);
+                if (cw <= 0 || ch <= 0) continue;
+                // 压缩直拷需块对齐（res 与 Q 已保证对齐；仅地形边缘钳制等异常会触发）
                 bool aligned = (sx % _blockA | sz % _blockA | dx % _blockA | dz % _blockA | cw % _blockA | ch % _blockA) == 0
                             && (sx % _blockN | sz % _blockN | dx % _blockN | dz % _blockN | cw % _blockN | ch % _blockN) == 0;
                 if (!aligned)
@@ -680,6 +692,16 @@ namespace MightyTerrainMesh
                 Graphics.CopyTexture(ta, 0, 0, sx, sz, cw, ch, _albedoArray, op.layer, 0, dx, dz);
                 Graphics.CopyTexture(tn, 0, 0, sx, sz, cw, ch, _normalArray, op.layer, 0, dx, dz);
             }
+        }
+
+        /// <summary>源矩形一维钳制进 [0,res]，目标坐标同步平移、长度同步收窄，保持内容对齐。</summary>
+        void ClampCopyRect(ref int src, ref int dst, ref int len)
+        {
+            int s0 = Mathf.Clamp(src, 0, layerResolution);
+            int s1 = Mathf.Clamp(src + len, 0, layerResolution);
+            dst += s0 - src;
+            len = s1 - s0;
+            src = s0;
         }
 
         /// <summary>Job 重采样路径（Terrain/Test 模式，及无金字塔的旧烘焙数据）。</summary>
@@ -786,6 +808,96 @@ namespace MightyTerrainMesh
             // sRGB 标志与目标 array 一致（CopyTexture 要求格式兼容）：albedo sRGB / normal linear
             if (stgA == null) stgA = new Texture2D(w, h, TextureFormat.RGBA32, false, false);
             if (stgN == null) stgN = new Texture2D(w, h, TextureFormat.RGBA32, false, true);
+        }
+
+        // ---------------------------------------------------------
+        // Gizmos：clipmap 区块可视化（运行时 = 实时窗口吸附状态；编辑模式 = 按序列化参数预估）
+
+        void OnDrawGizmos()
+        {
+            if (!showGizmos) return;
+            // 混合带起点与 shader 全局值同步（带宽门闸降级①收窄 0.75→0.80）
+            float blendStart = _governorStep >= 1 ? 0.80f : 0.75f;
+            Vector3 camPos = viewCamera != null ? viewCamera.transform.position
+                : new Vector3(terrainOriginXZ.x + terrainSize * 0.5f, 0f, terrainOriginXZ.y + terrainSize * 0.5f);
+
+            // 运行时以 Awake/Update 的实际状态为准（层数 K 与 baseFootprint 已被 manifest 校正）；
+            // 编辑模式 _origins 为空，按序列化参数估算 K = ceil(log2(S/base))，窗口以相机为中心近似
+            bool runtime = _origins != null && _levelCount > 0;
+            int kCount = runtime ? _levelCount : Mathf.Clamp(
+                Mathf.Max(1, Mathf.CeilToInt(Mathf.Log(terrainSize / Mathf.Max(1f, baseFootprint), 2f) - 1e-3f)),
+                1, MaxLevelCount);
+            var camLocal = new Vector2(camPos.x - terrainOriginXZ.x, camPos.z - terrainOriginXZ.y);
+
+            for (int k = kCount - 1; k >= 0; --k) // 粗层先画，细层后画不被盖住
+            {
+                float fp = baseFootprint * (1 << k);
+                Vector2 o = runtime ? _origins[k] : ComputeOrigin(camLocal, k);
+                float w0x = terrainOriginXZ.x + o.x, w0z = terrainOriginXZ.y + o.y;
+                bool valid = !runtime || _layerValid[k];
+                // 贴合地表：取窗口中心地形高度（无高度图时回退相机高度），逐层抬高避免共面闪烁
+                float y = GroundY(w0x + fp * 0.5f, w0z + fp * 0.5f, camPos.y) + 0.5f + 0.2f * k;
+
+                var c = Color.HSVToRGB((float)k / Mathf.Max(1, kCount), 0.85f, 1f);
+                c.a = valid ? 1f : 0.25f; // 失效重填中的层半透明
+                Gizmos.color = c;
+                DrawRectXZ(w0x, w0z, fp, y);
+                // 混合带内框：r ≤ blendStart·R_k 区域采本层，外环向粗层混合（§6.2）
+                c.a *= 0.5f;
+                Gizmos.color = c;
+                float half = fp * 0.5f * blendStart;
+                DrawRectXZ(w0x + fp * 0.5f - half, w0z + fp * 0.5f - half, half * 2f, y);
+#if UNITY_EDITOR
+                c.a = 1f;
+                UnityEditor.Handles.color = c;
+                UnityEditor.Handles.Label(new Vector3(w0x, y, w0z),
+                    $"L{k}: {fp:F0}m, texel {fp / layerResolution * 100f:F2}cm" +
+                    (runtime && !valid ? "（重填中）" : runtime ? "" : "（预估）"));
+#endif
+            }
+            // 实际驻留的烘焙瓦片划分（直拷模式）：青色边界 + 坐标/尺寸标签
+            if (runtime && _source != null && _source.HasPyramid)
+            {
+                foreach (var (level, tx, tz) in _source.ResidentTiles)
+                {
+                    float tw = _source.TileWorld0 * (1 << level);
+                    float wx = terrainOriginXZ.x + tx * tw;
+                    float wz = terrainOriginXZ.y + tz * tw;
+                    float yt = GroundY(wx + tw * 0.5f, wz + tw * 0.5f, camPos.y) + 1.0f;
+                    Gizmos.color = new Color(0f, 1f, 1f, 0.8f);
+                    DrawRectXZ(wx, wz, tw, yt);
+#if UNITY_EDITOR
+                    UnityEditor.Handles.color = new Color(0f, 1f, 1f, 0.9f);
+                    UnityEditor.Handles.Label(new Vector3(wx, yt, wz), $"瓦片 l{level}_{tx}_{tz}  {tw:F0}m");
+#endif
+                }
+            }
+            // 静态层 L_K：覆盖全地形（白色外框）
+            float ys = GroundY(terrainOriginXZ.x + terrainSize * 0.5f, terrainOriginXZ.y + terrainSize * 0.5f, camPos.y) + 0.1f;
+            Gizmos.color = new Color(1f, 1f, 1f, 0.4f);
+            DrawRectXZ(terrainOriginXZ.x, terrainOriginXZ.y, terrainSize, ys);
+#if UNITY_EDITOR
+            UnityEditor.Handles.color = Color.white;
+            UnityEditor.Handles.Label(new Vector3(terrainOriginXZ.x, ys, terrainOriginXZ.y),
+                $"静态层 L{kCount}: 全地形 {terrainSize:F0}m, texel {terrainSize / layerResolution:F2}m");
+#endif
+        }
+
+        /// <summary>地表高度采样（高度图未注册时回退 fallback）。</summary>
+        float GroundY(float wx, float wz, float fallback)
+        {
+            float h = 0f;
+            return MTHeightMap.GetHeightInterpolated(new Vector3(wx, 0f, wz), ref h) ? h : fallback;
+        }
+
+        static void DrawRectXZ(float x, float z, float size, float y)
+        {
+            var a = new Vector3(x, y, z);
+            var b = new Vector3(x + size, y, z);
+            var c = new Vector3(x + size, y, z + size);
+            var d = new Vector3(x, y, z + size);
+            Gizmos.DrawLine(a, b); Gizmos.DrawLine(b, c);
+            Gizmos.DrawLine(c, d); Gizmos.DrawLine(d, a);
         }
     }
 }

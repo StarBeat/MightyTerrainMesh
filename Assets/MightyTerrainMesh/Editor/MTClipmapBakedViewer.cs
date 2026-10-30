@@ -7,12 +7,12 @@ namespace MightyTerrainMesh.EditorTools
     using UnityEngine;
 
     /// <summary>
-    /// Clipmap 烘焙产物可视化查看器：
-    /// - 直接读取 .bytes 文件（不经过 Resources/AssetDatabase，烘焙落盘即可查看）；
-    /// - 支持 l7/l8/block_* 的 albedo 与 normal，以及 tiles/ 瓦片金字塔（网格地图点选、纹理懒加载）；
-    /// - 格式支持 RGBA32 / BC7（§10 桌面）/ ASTC_6x6 / ASTC_5x5，RGB/R/G/B/A 通道隔离；
-    /// - albedo.A=Metallic；normal 可解码为法线可视化（RG=法线XZ → 重建 Up 分量；B=粗糙度、A=AO 走通道隔离查看）；
-    /// - 含 mip 链的纹理（L8）可逐级查看，验证离线 mip 是否正确生成；
+    /// Clipmap 烘焙产物可视化查看器（v3：PNG 源图）：
+    /// - 直接解码 PNG 文件（Texture2D.LoadImage，不经导入器，烘焙落盘即可查看，无平台压缩干扰）；
+    /// - 支持 l7/l8 的 albedo 与 normal，以及 tiles/ 瓦片金字塔（网格地图点选、纹理懒加载）；
+    /// - RGB/R/G/B/A 通道隔离；albedo.A=Metallic；normal 可解码为法线可视化
+    ///   （RG=法线XZ → 重建 Up 分量；B=粗糙度、A=AO 走通道隔离查看）；
+    /// - 平台压缩后的实际效果（BC7/ASTC 质量）请在导入产物上用 Inspector 查看，此处恒为无损源图；
     /// - l7/l8 预览上叠加 manifest 高精块区域框（旧数据）；鼠标位置 → UV/texel/世界坐标读数。
     /// </summary>
     public class MTClipmapBakedViewer : EditorWindow
@@ -30,37 +30,28 @@ namespace MightyTerrainMesh.EditorTools
         private class Entry
         {
             public string name;
-            public string path;             // 逐文件模式；null = 归档模式（用 bin* 字段）
-            public string binPath;
-            public long binOffset;
-            public int binLen;
+            public string path;             // PNG 文件路径
             public bool sRGB;
             public bool isNormal;
             public bool isFullTerrain;          // l7/l8：覆盖全地形（用于块区域叠加与世界坐标读数）
-            public int blockIndex = -1;         // block_{i}_* → i
+            public int blockIndex = -1;         // block_{i}_* → i（旧数据，v3 不再产出）
             public bool isTile;                 // tiles/l{lvl}_{x}_{z}_*：金字塔瓦片（纹理懒加载）
             public int tileLevel, tileX, tileZ;
-            public Texture2D tex;               // 原始数据（含 mip 链）
+            public Texture2D tex;               // PNG 解码纹理（RGBA32）
             public Texture2D display;           // 按当前选项生成的显示纹理
-            public Color32[] dispPx;            // 当前 mip 的原始像素（供鼠标读数 + 通道切换缓存）
-            public int dispMip = -1;            // dispPx 对应的 mip（-1 = 未缓存）
+            public Color32[] dispPx;            // 原始像素（供鼠标读数 + 通道切换缓存）
             public int dispW, dispH;
             public string displayKey = "";
-            public int width, height, mipCount = 1;
-            public TextureFormat format;
+            public int width, height;
             public long fileSize;
             public string error;
         }
 
-        // 金字塔瓦片引用：仅登记位置，点选时才加载纹理解码（全量模式 L0 可达数万片）。
-        // 两种来源：逐文件（pathA/pathN，旧版 tiles/ 目录）或归档（binPath + offset/lenA/lenN）。
+        // 金字塔瓦片引用：仅登记 PNG 路径，点选时才解码（全量模式 L0 可达数万片）。
         private class TileRef
         {
             public int level, tx, tz;
-            public string pathA, pathN; // albedo / normal 文件路径（逐文件模式）
-            public string binPath;      // tiles.bin（归档模式）
-            public long offset;
-            public int lenA, lenN;
+            public string pathA, pathN; // albedo / normal PNG 路径
         }
 
         private string _dir = "Assets/Resources/ClipmapBaked";
@@ -84,7 +75,6 @@ namespace MightyTerrainMesh.EditorTools
         private static readonly string[] ChannelNames = { "RGB", "R", "G", "B", "A" };
         private ChannelMode _channel = ChannelMode.RGB;
         private bool _decodeNormal = true;
-        private int _mip = 0;
         private bool _pointFilter = true;
         private bool _showBlocks = true;
 
@@ -138,10 +128,10 @@ namespace MightyTerrainMesh.EditorTools
             catch (Exception e) { _loadError = "manifest 解析失败: " + e.Message; return; }
             if (_manifest == null || _manifest.textureDataVersion != ClipmapManifest.CurrentTextureDataVersion)
             {
-                _loadError = "纹理数据版本不匹配，请重新烘焙纯 raw 数据";
+                _loadError = "纹理数据版本不匹配，请重新烘焙（v3 = PNG 源图）";
                 return;
             }
-            foreach (var f in Directory.GetFiles(full, "*.bytes"))
+            foreach (var f in Directory.GetFiles(full, "*.png"))
             {
                 var name = Path.GetFileNameWithoutExtension(f);
                 var e = new Entry
@@ -153,11 +143,6 @@ namespace MightyTerrainMesh.EditorTools
                     isFullTerrain = name.StartsWith("l7_") || name.StartsWith("l8_"),
                     fileSize = new FileInfo(f).Length,
                 };
-                if (name.StartsWith("block_"))
-                {
-                    var parts = name.Split('_');
-                    if (parts.Length >= 3) int.TryParse(parts[1], out e.blockIndex);
-                }
                 LoadEntry(e);
                 _entries.Add(e);
             }
@@ -168,19 +153,18 @@ namespace MightyTerrainMesh.EditorTools
             });
             ScanTiles(full);
             if (_entries.Count == 0 && _tileLevels.Count == 0)
-                _loadError = "目录中没有 .bytes 烘焙产物: " + full;
+                _loadError = "目录中没有 .png 烘焙产物: " + full;
             else if (_entries.Count > 0)
                 _selected = 0;
         }
 
-        // 扫描金字塔瓦片：旧版 tiles/ 子目录（只解析文件名）+ StreamingAssets 归档索引（tiles.idx），
-        // 两者互补，同键以逐文件条目为准
+        // 扫描金字塔瓦片：tiles/ 子目录的 PNG（只解析文件名，点选时才解码）
         void ScanTiles(string full)
         {
             var byLevel = new Dictionary<int, Dictionary<long, TileRef>>();
             string tileDir = Path.Combine(full, "tiles");
             if (Directory.Exists(tileDir))
-            foreach (var f in Directory.GetFiles(tileDir, "*.bytes"))
+            foreach (var f in Directory.GetFiles(tileDir, "*.png"))
             {
                 var p = Path.GetFileNameWithoutExtension(f).Split('_');
                 if (p.Length != 4 || p[0].Length < 2 || p[0][0] != 'l') continue;
@@ -201,10 +185,6 @@ namespace MightyTerrainMesh.EditorTools
                 }
                 if (albedo) tr.pathA = f; else tr.pathN = f;
             }
-            // 归档：与输出根对应的 StreamingAssets 目录下的 tiles.idx（绝对路径，避免依赖 CWD）
-            string idxPath = Path.Combine(
-                MTTerrainBakePipeline.ToFullPath(MTTerrainBakePipeline.StreamingRootOf(_dir)), "tiles.idx");
-            if (File.Exists(idxPath)) ScanArchive(idxPath, byLevel);
             foreach (var kv in byLevel)
             {
                 var list = new List<TileRef>(kv.Value.Values);
@@ -213,37 +193,6 @@ namespace MightyTerrainMesh.EditorTools
                 _tileLevels.Add(kv.Key);
             }
             _tileLevels.Sort();
-        }
-
-        void ScanArchive(string idxPath, Dictionary<int, Dictionary<long, TileRef>> byLevel)
-        {
-            try
-            {
-                var bytes = File.ReadAllBytes(idxPath);
-                if (bytes.Length < 12 || BitConverter.ToInt32(bytes, 0) != 0x4954544D) return; // 'MTTI'
-                int p = 8; // magic + 版本（仅 1 个版本，字段固定）
-                int count = BitConverter.ToInt32(bytes, p); p += 4;
-                string binPath = Path.Combine(Path.GetDirectoryName(idxPath), "tiles.bin");
-                for (int i = 0; i < count; ++i)
-                {
-                    int lvl = BitConverter.ToInt32(bytes, p); p += 4;
-                    int tx = BitConverter.ToInt32(bytes, p); p += 4;
-                    int tz = BitConverter.ToInt32(bytes, p); p += 4;
-                    long off = BitConverter.ToInt64(bytes, p); p += 8;
-                    int lenA = BitConverter.ToInt32(bytes, p); p += 4;
-                    int lenN = BitConverter.ToInt32(bytes, p); p += 4;
-                    if (!byLevel.TryGetValue(lvl, out var map))
-                    {
-                        map = new Dictionary<long, TileRef>();
-                        byLevel.Add(lvl, map);
-                    }
-                    long key = ((long)tx << 32) | (uint)tz;
-                    if (map.ContainsKey(key)) continue; // 同键以逐文件条目为准
-                    map.Add(key, new TileRef { level = lvl, tx = tx, tz = tz,
-                        binPath = binPath, offset = off, lenA = lenA, lenN = lenN });
-                }
-            }
-            catch (Exception e) { Debug.LogWarning("[ClipmapViewer] tiles.idx 解析失败: " + e.Message); }
         }
 
         static int SortKey(Entry e)
@@ -258,99 +207,34 @@ namespace MightyTerrainMesh.EditorTools
         {
             try
             {
-                int res = e.isTile ? _manifest.tileRes
-                    : e.name.StartsWith("l7_") ? _manifest.l7Res
-                    : e.name.StartsWith("l8_") ? _manifest.l8Res
-                    : e.blockIndex >= 0 ? _manifest.blockRes : 0;
-                if (res <= 0) { e.error = "manifest 中没有该条目的有效分辨率"; return; }
-                e.width = e.height = res;
-                e.format = (TextureFormat)(e.isNormal ? _manifest.texFormatN : _manifest.texFormat);
-                var bytes = e.path != null ? File.ReadAllBytes(e.path) : ReadSegment(e.binPath, e.binOffset, e.binLen);
-                // 依据纯 raw 数据长度判断是否含完整 mip 链。
-                int sizeNoMip = MipDataSize(e.width, e.height, e.format, false);
-                int sizeFull = MipDataSize(e.width, e.height, e.format, true);
-                bool hasMips;
-                if (bytes.Length == sizeFull && sizeFull != sizeNoMip) hasMips = true;
-                else if (bytes.Length == sizeNoMip) hasMips = false;
-                else
+                // PNG 直解码（Lossless 源图）：不经导入器，烘焙落盘即可查看；尺寸/内容自描述
+                var tex = new Texture2D(2, 2, TextureFormat.RGBA32, false, true);
+                if (!tex.LoadImage(File.ReadAllBytes(e.path)))
                 {
-                    e.error = $"数据长度 {bytes.Length}B 与 {e.format} {e.width}×{e.height} 不匹配" +
-                              $"（无 mip 应 {sizeNoMip}B，含 mip 链应 {sizeFull}B）";
+                    DestroyImmediate(tex);
+                    e.error = "PNG 解码失败: " + e.path;
                     return;
                 }
-                var tex = new Texture2D(e.width, e.height, e.format, hasMips, !e.sRGB);
-                tex.LoadRawTextureData(bytes);
-                tex.Apply(false);
                 tex.wrapMode = TextureWrapMode.Clamp;
                 e.tex = tex;
-                e.mipCount = hasMips ? tex.mipmapCount : 1;
+                e.width = tex.width;
+                e.height = tex.height;
             }
             catch (Exception ex) { e.error = ex.Message; }
         }
 
-        static byte[] ReadSegment(string path, long offset, int len)
-        {
-            using (var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read))
-            {
-                fs.Seek(offset, SeekOrigin.Begin);
-                var buf = new byte[len];
-                int read = 0;
-                while (read < len)
-                {
-                    int r = fs.Read(buf, read, len - read);
-                    if (r <= 0) throw new EndOfStreamException("tiles.bin 数据截断");
-                    read += r;
-                }
-                return buf;
-            }
-        }
-
-        static int MipDataSize(int w, int h, TextureFormat fmt, bool fullChain)
-        {
-            long total = 0;
-            while (true)
-            {
-                total += SingleMipSize(w, h, fmt);
-                if (!fullChain || (w == 1 && h == 1)) break;
-                w = Mathf.Max(1, w >> 1);
-                h = Mathf.Max(1, h >> 1);
-            }
-            return (int)total;
-        }
-
-        static int SingleMipSize(int w, int h, TextureFormat fmt)
-        {
-            switch (fmt)
-            {
-                case TextureFormat.RGBA32: return w * h * 4;
-                case TextureFormat.BC7: return ((w + 3) / 4) * ((h + 3) / 4) * 16; // 4×4 块 × 16B（§10 桌面格式）
-                case TextureFormat.ASTC_6x6: return ((w + 5) / 6) * ((h + 5) / 6) * 16;
-                case TextureFormat.ASTC_5x5: return ((w + 4) / 5) * ((h + 4) / 5) * 16;
-                default: throw new NotSupportedException("查看器暂不支持格式: " + fmt);
-            }
-        }
-
         // ---------------- 显示纹理生成 ----------------
 
-        string DisplayKey() => $"{_channel}|{_decodeNormal}|{_mip}|{_pointFilter}";
+        string DisplayKey() => $"{_channel}|{_decodeNormal}|{_pointFilter}";
 
         void RebuildDisplay(Entry e)
         {
             if (e.display != null) { DestroyImmediate(e.display); e.display = null; }
             if (e.tex == null) return;
-            int mip = Mathf.Min(_mip, e.mipCount - 1);
-            // ASTC/BC7 的 GetPixels32 走编辑器软解，2040² 耗时可观：
-            // 按 mip 缓存解码结果，切通道/滤波/解码开关时不再重复软解
-            Color32[] px;
-            if (e.dispPx != null && e.dispMip == mip) px = e.dispPx;
-            else
-            {
-                px = e.tex.GetPixels32(mip); // 压缩格式由编辑器软件解码；sRGB 纹理返回原始存储值
-                e.dispPx = px;
-                e.dispMip = mip;
-            }
-            int w = Mathf.Max(1, e.width >> mip);
-            int h = Mathf.Max(1, e.height >> mip);
+            // PNG 源图解码结果按条目缓存：切通道/滤波/解码开关时不再重复解码
+            Color32[] px = e.dispPx ?? (e.dispPx = e.tex.GetPixels32(0));
+            int w = e.width;
+            int h = e.height;
             var outPx = new Color32[px.Length];
             bool decode = _channel == ChannelMode.RGB && _decodeNormal && e.isNormal;
             for (int i = 0; i < px.Length; ++i)
@@ -385,7 +269,7 @@ namespace MightyTerrainMesh.EditorTools
             d.filterMode = _pointFilter ? FilterMode.Point : FilterMode.Bilinear;
             d.wrapMode = TextureWrapMode.Clamp;
             e.display = d;
-            e.dispPx = px;   // 保留当前 mip 原始像素供读数
+            e.dispPx = px;   // 保留原始像素供读数
             e.dispW = w;
             e.dispH = h;
             e.displayKey = DisplayKey();
@@ -393,7 +277,7 @@ namespace MightyTerrainMesh.EditorTools
 
         // ---------------- 瓦片金字塔浏览 ----------------
 
-        // 点选瓦片：销毁上一片纹理（2040² RGBA32 达 33MB，不缓存多片），按当前 albedo/normal 选择加载对应文件
+        // 点选瓦片：销毁上一片纹理（2040² RGBA32 达 33MB，不缓存多片），按当前 albedo/normal 选择解码对应 PNG
         void SelectTile(TileRef t)
         {
             _tileMode = true;
@@ -402,24 +286,20 @@ namespace MightyTerrainMesh.EditorTools
             DestroyEntry(_tileEntry);
             _tileEntry = null;
             string path = _tileAlbedo ? t.pathA : t.pathN;
-            if (path == null && t.binPath == null) return; // 无逐文件也无归档（理论上不发生，防御）
+            if (path == null) return;
             _tileEntry = new Entry
             {
                 name = $"l{t.level}_{t.tx}_{t.tz}_{(_tileAlbedo ? "albedo" : "normal")}",
                 path = path,
-                binPath = t.binPath,
-                binOffset = t.offset + (_tileAlbedo ? 0 : t.lenA), // 归档内 albedo 在前、normal 在后
-                binLen = _tileAlbedo ? t.lenA : t.lenN,
                 sRGB = _tileAlbedo,
                 isNormal = !_tileAlbedo,
                 isTile = true,
                 tileLevel = t.level,
                 tileX = t.tx,
                 tileZ = t.tz,
-                fileSize = path != null ? new FileInfo(path).Length : (_tileAlbedo ? t.lenA : t.lenN),
+                fileSize = new FileInfo(path).Length,
             };
             LoadEntry(_tileEntry);
-            _mip = 0;
         }
 
         private Texture2D _tileMapTex;   // 网格地图缓存（按 level 重建）
@@ -520,7 +400,6 @@ namespace MightyTerrainMesh.EditorTools
                 {
                     _selected = i;
                     _tileMode = false;
-                    _mip = 0;
                 }
             }
             // 瓦片金字塔（tiles/）：层级选择 + 网格地图点选 + albedo/normal 切换
@@ -578,10 +457,6 @@ namespace MightyTerrainMesh.EditorTools
             if (e.isFullTerrain && _manifest != null)
                 _showBlocks = EditorGUILayout.ToggleLeft("块区域", _showBlocks, GUILayout.Width(60));
             EditorGUILayout.EndHorizontal();
-            if (e.mipCount > 1)
-                _mip = EditorGUILayout.IntSlider($"Mip（共 {e.mipCount} 级）", _mip, 0, e.mipCount - 1);
-            else
-                _mip = 0;
 
             if (e.display == null || e.displayKey != DisplayKey())
                 RebuildDisplay(e);
@@ -626,7 +501,7 @@ namespace MightyTerrainMesh.EditorTools
                 float v = 1f - Mathf.InverseLerp(pr.y, pr.yMax, mp.y); // GUI y 向下 → 纹理 v 向上
                 int tx = Mathf.Clamp((int)(u * e.display.width), 0, e.display.width - 1);
                 int ty = Mathf.Clamp((int)(v * e.display.height), 0, e.display.height - 1);
-                readout = $"uv=({u:F4}, {v:F4})  texel(mip{_mip})=({tx}, {ty})";
+                readout = $"uv=({u:F4}, {v:F4})  texel=({tx}, {ty})";
                 if (e.dispPx != null && e.dispW > 0)
                 {
                     var c = e.dispPx[ty * e.dispW + tx];
@@ -666,7 +541,7 @@ namespace MightyTerrainMesh.EditorTools
                 tileInfo = $"  世界范围=({_manifest.originX + e.tileX * tw:F0}, {_manifest.originZ + e.tileZ * tw:F0})~({_manifest.originX + (e.tileX + 1) * tw:F0}, {_manifest.originZ + (e.tileZ + 1) * tw:F0})m";
             }
             EditorGUILayout.LabelField(
-                $"{e.name}: {e.width}×{e.height} {e.format}  mip={e.mipCount}  文件={e.fileSize / 1024}KB" +
+                $"{e.name}: {e.width}×{e.height} PNG 源图（平台压缩见导入器）  文件={e.fileSize / 1024}KB" +
                 (e.sRGB ? "  sRGB" : "  linear") + tileInfo,
                 EditorStyles.miniLabel);
         }
