@@ -12,18 +12,35 @@ PluginImporter:
   validateReferences: 1
   platformData:
   - first:
+      : Any
+    second:
+      enabled: 0
+      settings:
+        Exclude Android: 1
+        Exclude Editor: 1
+        Exclude Linux64: 1
+        Exclude OSXUniversal: 1
+        Exclude Win: 1
+        Exclude Win64: 1
+        Exclude iOS: 1
+  - first:
       Any: 
     second:
       enabled: 0
       settings: {}
   - first:
-      Editor:
-        serializedVersion: 2
+      Editor: 
     second:
       enabled: 0
       settings:
         CPU: AnyCPU
         OS: AnyOS
+  - first:
+      Editor: Editor
+    second:
+      enabled: 0
+      settings:
+        DefaultValueInitialized: true
   userData: 
   assetBundleName: 
   assetBundleVariant: 
