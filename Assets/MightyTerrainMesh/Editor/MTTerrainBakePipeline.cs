@@ -229,7 +229,8 @@ namespace MightyTerrainMesh.EditorTools
         /// </summary>
         public static void BakeClipmap(Terrain terrain, int l7Res, int l8Res, ClipmapBakeFormat format,
             string outputRoot, List<Rect> regions, bool bakePyramid,
-            bool pyramidFullCoverage = true, int pyramidCoarseFullFromLevel = 3)
+            bool pyramidFullCoverage = true, int pyramidCoarseFullFromLevel = 3,
+            TextureCompressionQuality pyramidFineQuality = TextureCompressionQuality.Fast)
         {
             if (terrain == null) { MTLog.LogError("no target terrain"); return; }
             Directory.CreateDirectory(outputRoot);
@@ -256,16 +257,27 @@ namespace MightyTerrainMesh.EditorTools
             var swTotal = System.Diagnostics.Stopwatch.StartNew();
             try
             {
-                // L7 粗源（Job 回退路径用）/ 静态层 L_K（全地形 S/2040 texel，完整 Mip 链：§4.1 离线生成）
-                BakeClipmapLayer(src, "l7", l7Res, new float2(origin.x, origin.z), size / l7Res, false, fmtA, fmtN, outputRoot);
+                // L7 仅供无金字塔旧数据的 Job 回退采样；直拷模式（烘焙金字塔存在时）运行时从不加载，跳过。
+                // 静态层 L_K：全地形 S/2040 texel，完整 Mip 链（§4.1 离线生成）。
+                if (!bakePyramid)
+                    BakeClipmapLayer(src, "l7", l7Res, new float2(origin.x, origin.z), size / l7Res, false, fmtA, fmtN, outputRoot);
+                else
+                {
+                    // 清掉旧烘焙残留的 L7（直拷模式不加载，避免 Viewer 显示过期数据）
+                    foreach (var n in new[] { "l7_albedo", "l7_normal" })
+                    {
+                        string stale = Path.Combine(outputRoot, n + ".bytes");
+                        if (File.Exists(stale)) File.Delete(stale);
+                    }
+                }
                 BakeClipmapLayer(src, "l8", l8Res, new float2(origin.x, origin.z), size / l8Res, true, fmtA, fmtN, outputRoot);
 
                 // 瓦片金字塔（§7.1 流式契约）：L0 与 clipmap L0 层同密度（1.57cm@2040²），逐级盒滤波合并
                 if (bakePyramid)
                 {
                     int n = BakeTilePyramid(src, terrain, 2040, ClipmapBlockWorldSize, fmtA, fmtN, outputRoot, manifest,
-                        pyramidFullCoverage, regions, pyramidCoarseFullFromLevel);
-                    Debug.Log($"[ClipmapBaker] 金字塔：{manifest.tileLevels} 级，L0 {n} 片，tiles/ 目录");
+                        pyramidFullCoverage, regions, pyramidCoarseFullFromLevel, pyramidFineQuality);
+                    Debug.Log($"[ClipmapBaker] 金字塔：{manifest.tileLevels} 级，L0 {n} 片，StreamingAssets 归档");
                 }
                 else { manifest.tileLevels = 0; }
 
@@ -356,12 +368,13 @@ namespace MightyTerrainMesh.EditorTools
         /// - 区域模式：L0 仅烘与 regions 相交的瓦片（高精包），区域父级（j&lt;coarseFullFrom）需 4 子块齐聚才生成；
         ///   j ≥ coarseFullFrom 的粗级全网格直接从地形按该级密度采样（片数少，保证顶层环面可供流式直拷）。
         /// 级数 = ceil(log2(S/tileWorld0))（顶级覆盖 S/2，与运行时 K=log2(S)−5 的顶层环面 footprint 对齐）。
-        /// 输出 tiles/l{级}_{x}_{z}_{albedo|normal}.bytes，并回填 manifest。进度条可取消（取消后需重新完整烘焙）。
-        /// 返回 L0 实际烘焙片数。
+        /// 输出 StreamingAssets 归档 tiles.bin + tiles.idx（L0 质量 fineQuality，≥L1 恒为 Fast），并回填 manifest。
+        /// 进度条可取消（取消后需重新完整烘焙）。返回 L0 实际烘焙片数。
         /// </summary>
         public static int BakeTilePyramid(ClipmapSourceRuntime src, Terrain terrain, int tileRes, float tileWorld0,
             TextureFormat fmtA, TextureFormat fmtN, string outputRoot, ClipmapManifest manifest,
-            bool fullCoverage, List<Rect> regions, int coarseFullFromLevel)
+            bool fullCoverage, List<Rect> regions, int coarseFullFromLevel,
+            TextureCompressionQuality fineQuality = TextureCompressionQuality.Fast)
         {
             float size = terrain.terrainData.size.x;
             var origin = terrain.transform.position;
@@ -370,9 +383,15 @@ namespace MightyTerrainMesh.EditorTools
             manifest.tileWorld0 = tileWorld0;
             manifest.tileLevels = levels;
 
-            string tileDir = Path.Combine(outputRoot, "tiles");
-            Directory.CreateDirectory(tileDir);
-            foreach (var old in Directory.GetFiles(tileDir, "*.bytes")) File.Delete(old); // 清旧防残留
+            // 瓦片归档（StreamingAssets）：单文件 tiles.bin + 索引 tiles.idx，取代逐瓦片 .bytes
+            // （8192m 全量 13 万文件 → 2 个文件；构建后 Resources 不可按路径读，归档走 File IO）。
+            // 旧版逐文件 tiles/ 目录删除防残留。
+            using var arc = new TileArchiveWriter(ToFullPath(StreamingRootOf(outputRoot)));
+            // ASTC 双格式且有 astcenc → 外部进程池并行压缩；否则 Unity 内置（单线程）兜底
+            using var comp = CreateTileCompressor(arc, fmtA, fmtN, tileRes);
+            string legacyTileDir = Path.Combine(outputRoot, "tiles");
+            if (Directory.Exists(legacyTileDir)) Directory.Delete(legacyTileDir, true);
+            manifest.tileArchive = 1;
 
             // 区域模式：卷积传播止于 coarseFullFrom-1 级父块；粗级全量直接烘焙
             int directFrom = fullCoverage ? levels : Mathf.Clamp(coarseFullFromLevel, 1, levels - 1);
@@ -404,8 +423,7 @@ namespace MightyTerrainMesh.EditorTools
                 // 父块优先扫描：同一父块的 2×2 子块连续烘焙，父块即时收尾释放——
                 // 同时挂起的累积器 ≈ 层数个（行优先扫描会挂起 ~gx 个，2040² 下单个 33MB 不可接受）
                 int gxP = (gx0 + 1) / 2;
-                int baked = 0;
-                var swL0 = System.Diagnostics.Stopwatch.StartNew();
+                var seq = new List<int>(total0); // tx | tz<<16，保持父块优先顺序
                 for (int pz = 0; pz < gxP; ++pz)
                 for (int px = 0; px < gxP; ++px)
                 for (int dz = 0; dz < 2; ++dz)
@@ -413,15 +431,52 @@ namespace MightyTerrainMesh.EditorTools
                 {
                     int tx = px * 2 + dx, tz = pz * 2 + dz;
                     if (tx >= gx0 || tz >= gx0 || !bake0[tx, tz]) continue;
+                    seq.Add(tx | (tz << 16));
+                }
+
+                // 双缓冲流水：压缩/存盘瓦片 i（主线程）与采样瓦片 i+1（worker 线程）重叠。
+                // 此前 Schedule 后立即 CompleteAll，采样时主线程空等、压缩时 worker 全闲。
+                int baked = 0;
+                var swL0 = System.Diagnostics.Stopwatch.StartNew();
+                var bufA = new NativeArray<Color32>[2];
+                var bufN = new NativeArray<Color32>[2];
+                var hA = new JobHandle[2];
+                var hN = new JobHandle[2];
+                void ScheduleL0(int slot, int seqIdx)
+                {
+                    int tx = seq[seqIdx] & 0xFFFF, tz = seq[seqIdx] >> 16;
+                    bufA[slot] = new NativeArray<Color32>(tileRes * tileRes, Allocator.TempJob);
+                    bufN[slot] = new NativeArray<Color32>(tileRes * tileRes, Allocator.TempJob);
+                    float2 wmin = new float2(origin.x + tx * tileWorld0, origin.z + tz * tileWorld0);
+                    float texel = tileWorld0 / tileRes;
+                    var jA = src.CreateJob(0, true, wmin, texel, tileRes, bufA[slot], tileRes, 0);
+                    var jN = src.CreateJob(0, false, wmin, texel, tileRes, bufN[slot], tileRes, 0);
+                    hA[slot] = jA.Schedule(tileRes * tileRes, 256);
+                    hN[slot] = jN.Schedule(tileRes * tileRes, 256);
+                }
+                void CancelL0(int slot) // 清理唯一挂起的槽位（取消路径）
+                {
+                    JobHandle.CompleteAll(ref hA[slot], ref hN[slot]);
+                    if (bufA[slot].IsCreated) bufA[slot].Dispose();
+                    if (bufN[slot].IsCreated) bufN[slot].Dispose();
+                }
+                if (seq.Count > 0) ScheduleL0(0, 0);
+                for (int i = 0; i < seq.Count; ++i)
+                {
+                    int slot = i & 1;
+                    int tx = seq[i] & 0xFFFF, tz = seq[i] >> 16;
                     if (EditorUtility.DisplayCancelableProgressBar("瓦片金字塔",
                             $"L0 {baked + 1}/{total0}  ({tx},{tz})", (float)baked / Mathf.Max(1, total0)))
                     {
+                        CancelL0(slot);
                         Debug.LogWarning("[ClipmapBaker] 金字塔烘焙已取消（tiles/ 不完整，请重新完整烘焙）");
                         return baked;
                     }
-                    BakeTileDirect(src, origin, tileRes, tileWorld0, 0, tx, tz, fmtA, fmtN, tileDir, out var pxA, out var pxN);
-                    PropagatePyramid(pending, levels, size, tileRes, tileWorld0, 0, tx, tz, pxA, pxN, fmtA, fmtN, tileDir, directFrom);
-                    pxA.Dispose(); pxN.Dispose();
+                    if (i + 1 < seq.Count) ScheduleL0(slot ^ 1, i + 1); // 先发射下一片，再收尾本片
+                    JobHandle.CompleteAll(ref hA[slot], ref hN[slot]);
+                    comp.Compress(0, tx, tz, bufA[slot], bufN[slot], fineQuality);
+                    PropagatePyramid(pending, levels, size, tileRes, tileWorld0, 0, tx, tz, bufA[slot], bufN[slot], comp, directFrom);
+                    bufA[slot].Dispose(); bufN[slot].Dispose();
                     ++baked;
                 }
                 // 全量模式下所有父块应收尾完毕；区域模式下区域边缘之外的父块不生成属预期
@@ -447,12 +502,13 @@ namespace MightyTerrainMesh.EditorTools
                             Debug.LogWarning("[ClipmapBaker] 金字塔烘焙已取消（tiles/ 不完整，请重新完整烘焙）");
                             return baked;
                         }
-                        BakeTileDirect(src, origin, tileRes, tw, lvl, tx, tz, fmtA, fmtN, tileDir, out var dA, out var dN);
-                        dA.Dispose(); dN.Dispose();
+                        BakeTileDirect(src, origin, tileRes, tw, lvl, tx, tz, comp);
                         ++done;
                     }
                     Debug.Log($"[ClipmapBaker] 金字塔 L{lvl} 粗级全量完成：{done} 片（耗时 {swLvl.Elapsed.TotalSeconds:F1}s）");
                 }
+                comp.Flush(); // 等待 astcenc 队列全部收尾写入归档（Unity 压缩路径为空操作）
+                Debug.Log($"[ClipmapBaker] 瓦片归档：{arc.Count} 片 → {StreamingRootOf(outputRoot)}/tiles.bin");
                 return baked;
             }
             finally
@@ -471,22 +527,21 @@ namespace MightyTerrainMesh.EditorTools
             }
         }
 
-        /// <summary>按 (lvl, tx, tz) 的世界矩形从地形直接采样一片瓦片并保存。</summary>
+        /// <summary>按 (lvl, tx, tz) 的世界矩形从地形直接采样一片瓦片，压缩入队（粗级，质量 Fast）。</summary>
         private static void BakeTileDirect(ClipmapSourceRuntime src, Vector3 origin, int tileRes, float tileWorld,
-            int lvl, int tx, int tz, TextureFormat fmtA, TextureFormat fmtN, string tileDir,
-            out NativeArray<Color32> pxA, out NativeArray<Color32> pxN)
+            int lvl, int tx, int tz, ITileCompressor comp)
         {
-            pxA = new NativeArray<Color32>(tileRes * tileRes, Allocator.TempJob);
-            pxN = new NativeArray<Color32>(tileRes * tileRes, Allocator.TempJob);
+            var pxA = new NativeArray<Color32>(tileRes * tileRes, Allocator.TempJob);
+            var pxN = new NativeArray<Color32>(tileRes * tileRes, Allocator.TempJob);
             float2 wmin = new float2(origin.x + tx * tileWorld, origin.z + tz * tileWorld);
             float texel = tileWorld / tileRes;
             var jobA = src.CreateJob(0, true, wmin, texel, tileRes, pxA, tileRes, 0);
             var jobN = src.CreateJob(0, false, wmin, texel, tileRes, pxN, tileRes, 0);
-            var hA = jobA.Schedule(tileRes * tileRes, 64);
-            var hN = jobN.Schedule(tileRes * tileRes, 64);
+            var hA = jobA.Schedule(tileRes * tileRes, 256);
+            var hN = jobN.Schedule(tileRes * tileRes, 256);
             JobHandle.CompleteAll(ref hA, ref hN);
-            SaveClipmapTex(pxA, tileRes, TilePath(tileDir, lvl, tx, tz, true), true, fmtA, false, TextureCompressionQuality.Normal);
-            SaveClipmapTex(pxN, tileRes, TilePath(tileDir, lvl, tx, tz, false), false, fmtN, false, TextureCompressionQuality.Normal);
+            comp.Compress(lvl, tx, tz, pxA, pxN, TextureCompressionQuality.Fast);
+            pxA.Dispose(); pxN.Dispose();
         }
 
         /// <summary>子块到位后向上卷积：子块即时盒滤波降采样写入父象限（累积器仅 tileRes²，省 4× 内存）；
@@ -494,8 +549,8 @@ namespace MightyTerrainMesh.EditorTools
         /// 卷积止于 stopBeforeLevel 级（该级起由 BakeTileDirect 全量直接烘焙，或已到顶级）。</summary>
         private static void PropagatePyramid(Dictionary<long, PyramidAccum>[] pending, int levels, float terrainSize,
             int tileRes, float tileWorld0, int level, int tx, int tz,
-            NativeArray<Color32> cA, NativeArray<Color32> cN, TextureFormat fmtA, TextureFormat fmtN,
-            string tileDir, int stopBeforeLevel)
+            NativeArray<Color32> cA, NativeArray<Color32> cN,
+            ITileCompressor comp, int stopBeforeLevel)
         {
             if (level + 1 >= levels || level + 1 >= stopBeforeLevel) return;
             int px = tx >> 1, pz = tz >> 1;
@@ -535,9 +590,9 @@ namespace MightyTerrainMesh.EditorTools
             map.Remove(key);
             try
             {
-                SaveClipmapTex(acc.a, tileRes, TilePath(tileDir, level + 1, px, pz, true), true, fmtA, false, TextureCompressionQuality.Normal);
-                SaveClipmapTex(acc.n, tileRes, TilePath(tileDir, level + 1, px, pz, false), false, fmtN, false, TextureCompressionQuality.Normal);
-                PropagatePyramid(pending, levels, terrainSize, tileRes, tileWorld0, level + 1, px, pz, acc.a, acc.n, fmtA, fmtN, tileDir, stopBeforeLevel);
+                // 粗级（≥L1）用 Fast：盒滤波已抹平细节，像素足迹大，Normal 的视觉收益不可见、耗时数倍
+                comp.Compress(level + 1, px, pz, acc.a, acc.n, TextureCompressionQuality.Fast);
+                PropagatePyramid(pending, levels, terrainSize, tileRes, tileWorld0, level + 1, px, pz, acc.a, acc.n, comp, stopBeforeLevel);
             }
             finally
             {
@@ -546,8 +601,461 @@ namespace MightyTerrainMesh.EditorTools
             }
         }
 
-        private static string TilePath(string tileDir, int level, int tx, int tz, bool albedo)
-            => Path.Combine(tileDir, $"l{level}_{tx}_{tz}_{(albedo ? "albedo" : "normal")}.bytes");
+        /// <summary>
+        /// 压缩一片瓦片并追加到归档（albedo 在前、normal 在后）。
+        /// 两张缓存纹理分别对应 albedo（sRGB）/ normal（linear），GetRawTextureData 别名写出后立即可复用。
+        /// </summary>
+        private static void AppendTileCompressed(TileArchiveWriter arc, int level, int tx, int tz,
+            NativeArray<Color32> pxA, NativeArray<Color32> pxN, int tileRes,
+            TextureFormat fmtA, TextureFormat fmtN, TextureCompressionQuality quality)
+        {
+            long offset = arc.Position;
+            var texA = GetBakeTex(tileRes, false, false);
+            texA.SetPixelData(pxA, 0);
+            texA.Apply(false);
+            if (fmtA != TextureFormat.RGBA32)
+                EditorUtility.CompressTexture(texA, fmtA, quality);
+            var rawA = texA.GetRawTextureData<byte>();
+            int lenA = rawA.Length;
+            arc.Write(rawA);
+
+            var texN = GetBakeTex(tileRes, false, true);
+            texN.SetPixelData(pxN, 0);
+            texN.Apply(false);
+            if (fmtN != TextureFormat.RGBA32)
+                EditorUtility.CompressTexture(texN, fmtN, quality);
+            var rawN = texN.GetRawTextureData<byte>();
+            int lenN = rawN.Length;
+            arc.Write(rawN);
+
+            arc.AddRecord(level, tx, tz, offset, lenA, lenN);
+        }
+
+        /// <summary>
+        /// 瓦片归档写出器：tiles.bin（顺序追加的压缩字节流，albedo+normal 交替）+
+        /// tiles.idx（二进制索引，Dispose 时落盘：magic 'MTTI' / 版本 1 / N × {level,tx,tz,offset,lenA,lenN}）。
+        /// </summary>
+        private sealed class TileArchiveWriter : System.IDisposable
+        {
+            private struct Rec { public int level, tx, tz; public long offset; public int lenA, lenN; }
+
+            private readonly FileStream _fs;
+            private readonly string _idxPath;
+            private readonly List<Rec> _recs = new List<Rec>();
+
+            public int Count => _recs.Count;
+            public long Position => _fs.Position;
+
+            public TileArchiveWriter(string fullDir)
+            {
+                Directory.CreateDirectory(fullDir);
+                _fs = new FileStream(Path.Combine(fullDir, "tiles.bin"), FileMode.Create, FileAccess.Write,
+                    FileShare.None, 1 << 20, FileOptions.SequentialScan);
+                _idxPath = Path.Combine(fullDir, "tiles.idx");
+            }
+
+            public unsafe void Write(NativeArray<byte> raw)
+            {
+                var span = new System.ReadOnlySpan<byte>(
+                    (byte*)NativeArrayUnsafeUtility.GetUnsafeReadOnlyPtr(raw), raw.Length);
+                _fs.Write(span);
+            }
+
+            public void Write(byte[] data, int offset, int length) => _fs.Write(data, offset, length);
+
+            public void AddRecord(int level, int tx, int tz, long offset, int lenA, int lenN)
+                => _recs.Add(new Rec { level = level, tx = tx, tz = tz, offset = offset, lenA = lenA, lenN = lenN });
+
+            public void Dispose()
+            {
+                _fs.Dispose();
+                using (var bw = new BinaryWriter(new FileStream(_idxPath, FileMode.Create, FileAccess.Write, FileShare.None)))
+                {
+                    bw.Write(0x4954544D); // 'MTTI'
+                    bw.Write(1);          // 索引格式版本
+                    bw.Write(_recs.Count);
+                    foreach (var r in _recs)
+                    {
+                        bw.Write(r.level); bw.Write(r.tx); bw.Write(r.tz);
+                        bw.Write(r.offset); bw.Write(r.lenA); bw.Write(r.lenN);
+                    }
+                }
+            }
+        }
+
+        // ---------------- 瓦片压缩器（Unity 内置回退 / 外部编码器进程池：astcenc / Compressonator） ----------------
+
+        private interface ITileCompressor : System.IDisposable
+        {
+            void Compress(int level, int tx, int tz,
+                NativeArray<Color32> pxA, NativeArray<Color32> pxN, TextureCompressionQuality quality);
+            void Flush();       // 等待全部压缩完成并写入归档（正常结束路径调用）
+            int PendingCount { get; }
+        }
+
+        /// <summary>ASTC → astcenc、BC7 → Compressonator；双通道编码器齐备才用进程池，否则 Unity 内置主线程压缩。</summary>
+        private static ITileCompressor CreateTileCompressor(TileArchiveWriter arc,
+            TextureFormat fmtA, TextureFormat fmtN, int tileRes)
+        {
+            var encA = CreateTileEncoder(fmtA);
+            var encN = CreateTileEncoder(fmtN);
+            if (encA != null && encN != null)
+                return new ProcessTileCompressor(arc, encA, encN, tileRes);
+            if (encA != null || encN != null || IsAstc(fmtA) || IsAstc(fmtN) || fmtA == TextureFormat.BC7 || fmtN == TextureFormat.BC7)
+                Debug.LogWarning("[ClipmapBaker] 外部编码器不齐备（ASTC→astcenc / BC7→Compressonator），" +
+                                 "全程使用 Unity 内置压缩（较慢）；菜单 MightyTerrainMesh/ 下有对应下载项");
+            return new UnityTileCompressor(arc, fmtA, fmtN, tileRes);
+        }
+
+        private static TileEncoder CreateTileEncoder(TextureFormat f)
+        {
+            if (IsAstc(f)) return MTAstcEncoder.Locate() != null ? new AstcTileEncoder(f) : null;
+            if (f == TextureFormat.BC7) return MTBc7Encoder.Locate() != null ? new Bc7TileEncoder() : null;
+            return null;
+        }
+
+        private static bool IsAstc(TextureFormat f)
+            => f == TextureFormat.ASTC_6x6 || f == TextureFormat.ASTC_5x5;
+
+        /// <summary>
+        /// 单通道外部编码器适配：中间文件读写 + 运行参数 + 输出头剥离。
+        /// 方向约定：ASTC 用 TGA 左下原点（与 Unity raw 行序一致）；BC 工具链用 DDS（top-down 严格约定，
+        /// 写入时翻转让"图顶 = 纹理底"，输出块行序即与 Unity raw 一致）。
+        /// </summary>
+        private abstract class TileEncoder
+        {
+            protected readonly byte[] _buf = new byte[1 << 18]; // 转换暂存（仅主线程写输入用）
+            public abstract TextureFormat Format { get; } // 目标压缩格式（Unity 压缩回退用）
+            public abstract string InExt { get; }
+            public abstract string OutExt { get; }
+            public abstract void WriteInput(string path, NativeArray<Color32> px, int res);
+            public abstract bool Run(string inPath, string outPath, bool srgb,
+                TextureCompressionQuality quality, int jobs, out string err);
+            public abstract int DataOffset(byte[] outFile); // 压缩数据起始偏移（-1 = 文件非法）
+            public abstract NativeArray<Color32> ReadPixels(string path, int res); // Unity 压缩回退用
+        }
+
+        /// <summary>astcenc：TGA（32bpp BGRA，descriptor 0x08 左下原点——行序与 Unity raw 一致）。</summary>
+        private sealed class AstcTileEncoder : TileEncoder
+        {
+            private readonly string _block;
+            private readonly TextureFormat _format;
+            public AstcTileEncoder(TextureFormat f)
+            { _block = f == TextureFormat.ASTC_6x6 ? "6x6" : "5x5"; _format = f; }
+            public override TextureFormat Format => _format;
+            public override string InExt => ".tga";
+            public override string OutExt => ".astc";
+            public override bool Run(string inPath, string outPath, bool srgb,
+                TextureCompressionQuality quality, int jobs, out string err)
+                => MTAstcEncoder.Run(inPath, outPath, _block, srgb, quality, jobs, out err);
+            public override int DataOffset(byte[] outFile) => 16; // .astc 文件头 16 字节
+
+            public override unsafe void WriteInput(string path, NativeArray<Color32> px, int res)
+            {
+                using (var fs = new FileStream(path, FileMode.Create, FileAccess.Write, FileShare.None,
+                           1 << 20, FileOptions.SequentialScan))
+                {
+                    var header = new byte[18];
+                    header[2] = 2; // 非压缩真彩
+                    header[12] = (byte)(res & 0xFF); header[13] = (byte)(res >> 8);
+                    header[14] = (byte)(res & 0xFF); header[15] = (byte)(res >> 8);
+                    header[16] = 32;
+                    header[17] = 0x08; // 8 alpha 位 + 左下原点
+                    fs.Write(header, 0, header.Length);
+                    var src = (Color32*)NativeArrayUnsafeUtility.GetUnsafeReadOnlyPtr(px);
+                    int chunk = _buf.Length / 4;
+                    for (int off = 0; off < px.Length; off += chunk)
+                    {
+                        int n = Mathf.Min(chunk, px.Length - off);
+                        for (int i = 0; i < n; ++i)
+                        {
+                            var c = src[off + i];
+                            _buf[i * 4] = c.b; _buf[i * 4 + 1] = c.g;
+                            _buf[i * 4 + 2] = c.r; _buf[i * 4 + 3] = c.a;
+                        }
+                        fs.Write(_buf, 0, n * 4);
+                    }
+                }
+            }
+
+            public override unsafe NativeArray<Color32> ReadPixels(string path, int res)
+            {
+                var bytes = File.ReadAllBytes(path); // 头 18 字节、BGRA、左下原点（自己写出的格式）
+                var px = new NativeArray<Color32>(res * res, Allocator.TempJob);
+                fixed (byte* src = bytes)
+                {
+                    var dst = (Color32*)NativeArrayUnsafeUtility.GetUnsafePtr(px);
+                    for (int i = 0; i < px.Length; ++i)
+                    {
+                        byte* s = src + 18 + i * 4;
+                        dst[i] = new Color32(s[2], s[1], s[0], s[3]);
+                    }
+                }
+                return px;
+            }
+        }
+
+        /// <summary>Compressonator（BC7）：DDS 容器（128B 头 A8R8G8B8 未压缩，top-down——写入翻转行使图顶 = 纹理底）。</summary>
+        private sealed class Bc7TileEncoder : TileEncoder
+        {
+            public override TextureFormat Format => TextureFormat.BC7;
+            public override string InExt => ".dds";
+            public override string OutExt => ".dds";
+            public override bool Run(string inPath, string outPath, bool srgb,
+                TextureCompressionQuality quality, int jobs, out string err)
+                => MTBc7Encoder.Run(inPath, outPath, jobs, out err);
+
+            /// <summary>DDS 数据偏移：DX10 扩展头（BC7 必有，'DX10' FourCC）→ 148，否则 128；-1 = 非法文件。</summary>
+            public override int DataOffset(byte[] outFile)
+            {
+                if (outFile.Length < 128 || outFile[0] != 'D' || outFile[1] != 'D'
+                    || outFile[2] != 'S' || outFile[3] != ' ') return -1;
+                bool dx10 = outFile.Length >= 148 && outFile[84] == 'D' && outFile[85] == 'X'
+                    && outFile[86] == '1' && outFile[87] == '0';
+                return dx10 ? 148 : 128;
+            }
+
+            public override unsafe void WriteInput(string path, NativeArray<Color32> px, int res)
+            {
+                using (var fs = new FileStream(path, FileMode.Create, FileAccess.Write, FileShare.None,
+                           1 << 20, FileOptions.SequentialScan))
+                {
+                    var bw = new BinaryWriter(fs, System.Text.Encoding.ASCII, true);
+                    bw.Write(0x20534444);       // "DDS "
+                    bw.Write(124);              // 头尺寸
+                    bw.Write(0x0000100F);       // CAPS|HEIGHT|WIDTH|PITCH|PIXELFORMAT
+                    bw.Write(res);              // height
+                    bw.Write(res);              // width
+                    bw.Write(res * 4);          // pitch
+                    bw.Write(0);                // depth
+                    bw.Write(0);                // mipmaps
+                    for (int i = 0; i < 11; ++i) bw.Write(0); // reserved
+                    bw.Write(32);               // ddspf.size
+                    bw.Write(0x41);             // DDPF_RGB | DDPF_ALPHAPIXELS
+                    bw.Write(0);                // fourCC（未压缩）
+                    bw.Write(32);               // bitCount
+                    bw.Write(0x00FF0000);       // R mask
+                    bw.Write(0x0000FF00);       // G mask
+                    bw.Write(0x000000FF);       // B mask
+                    bw.Write((uint)0xFF000000); // A mask → 内存字节序 B,G,R,A
+                    bw.Write(0x1000);           // DDSCAPS_TEXTURE
+                    bw.Write(0); bw.Write(0); bw.Write(0); bw.Write(0);
+                    bw.Flush();
+                    // DDS top-down：先写纹理底行（px 行 0）→ 图顶 = 纹理底，输出块序与 Unity raw 一致
+                    var src = (Color32*)NativeArrayUnsafeUtility.GetUnsafeReadOnlyPtr(px);
+                    int chunk = _buf.Length / 4;
+                    for (int off = 0; off < px.Length; off += chunk)
+                    {
+                        int n = Mathf.Min(chunk, px.Length - off);
+                        for (int i = 0; i < n; ++i)
+                        {
+                            var c = src[off + i];
+                            _buf[i * 4] = c.b; _buf[i * 4 + 1] = c.g;
+                            _buf[i * 4 + 2] = c.r; _buf[i * 4 + 3] = c.a;
+                        }
+                        fs.Write(_buf, 0, n * 4);
+                    }
+                    bw.Dispose();
+                }
+            }
+
+            public override unsafe NativeArray<Color32> ReadPixels(string path, int res)
+            {
+                var bytes = File.ReadAllBytes(path);
+                int off = DataOffset(bytes);
+                if (off < 0) throw new System.Exception("DDS 输入非法: " + path);
+                var px = new NativeArray<Color32>(res * res, Allocator.TempJob);
+                fixed (byte* src = bytes)
+                {
+                    var dst = (Color32*)NativeArrayUnsafeUtility.GetUnsafePtr(px);
+                    // 与写入对称：文件行 0（图顶）= 纹理底 = px 行 0，无需翻转
+                    for (int i = 0; i < px.Length; ++i)
+                    {
+                        byte* s = src + off + (long)i * 4;
+                        dst[i] = new Color32(s[2], s[1], s[0], s[3]);
+                    }
+                }
+                return px;
+            }
+        }
+
+        private sealed class UnityTileCompressor : ITileCompressor
+        {
+            private readonly TileArchiveWriter _arc;
+            private readonly TextureFormat _fmtA, _fmtN;
+            private readonly int _tileRes;
+            public int PendingCount => 0;
+            public UnityTileCompressor(TileArchiveWriter arc, TextureFormat fmtA, TextureFormat fmtN, int tileRes)
+            { _arc = arc; _fmtA = fmtA; _fmtN = fmtN; _tileRes = tileRes; }
+            public void Compress(int level, int tx, int tz,
+                NativeArray<Color32> pxA, NativeArray<Color32> pxN, TextureCompressionQuality quality)
+                => AppendTileCompressed(_arc, level, tx, tz, pxA, pxN, _tileRes, _fmtA, _fmtN, quality);
+            public void Flush() { }
+            public void Dispose() { }
+        }
+
+        /// <summary>
+        /// 外部编码器进程池（astcenc / Compressonator，通道级适配）：采样线程只写中间文件入队，
+        /// K 个 worker 各跑子进程压缩，完成的瓦片由主线程在采样间隙/收尾时按完成序追加归档
+        /// （索引使文件内顺序无关）。单片失败回退 Unity 内置压缩（读回中间文件），烘焙不中断；
+        /// 取消时杀掉全部子进程。
+        /// </summary>
+        private sealed class ProcessTileCompressor : ITileCompressor
+        {
+            private sealed class Item
+            {
+                public int level, tx, tz;
+                public TextureCompressionQuality quality;
+                public string inA, inN, outA, outN;
+                public byte[] dataA, dataN;
+                public int offA, offN; // 输出头剥离偏移（-1 = 非法）
+                public bool ok;
+                public string error;
+            }
+
+            private readonly TileArchiveWriter _arc;
+            private readonly TileEncoder _encA, _encN;
+            private readonly int _tileRes;
+            private readonly string _tmpDir;
+            private readonly System.Collections.Concurrent.BlockingCollection<Item> _queue
+                = new System.Collections.Concurrent.BlockingCollection<Item>();
+            private readonly System.Collections.Concurrent.ConcurrentQueue<Item> _completed
+                = new System.Collections.Concurrent.ConcurrentQueue<Item>();
+            private readonly System.Threading.Tasks.Task[] _workers;
+            private int _queued, _drained;
+            private volatile bool _abandoned;
+
+            public int PendingCount => _queued - _drained;
+
+            public ProcessTileCompressor(TileArchiveWriter arc, TileEncoder encA, TileEncoder encN, int tileRes)
+            {
+                _arc = arc; _encA = encA; _encN = encN; _tileRes = tileRes;
+                _tmpDir = Path.Combine("Library", "MTTexEncTmp",
+                    System.Guid.NewGuid().ToString("N").Substring(0, 8));
+                Directory.CreateDirectory(_tmpDir);
+                int cores = Mathf.Max(2, System.Environment.ProcessorCount);
+                int workers = Mathf.Clamp(cores / 4, 1, 6);
+                int jobs = Mathf.Clamp(cores / (workers * 2), 1, 4); // 采样 Burst 也在跑，避免过订阅
+                Debug.Log($"[ClipmapBaker] 外部编码器并行压缩：{workers} 进程 × {jobs} 线程/进程" +
+                          $"（albedo={encA.GetType().Name}，normal={encN.GetType().Name}）");
+                _workers = new System.Threading.Tasks.Task[workers];
+                for (int i = 0; i < workers; ++i)
+                    _workers[i] = System.Threading.Tasks.Task.Run(() => WorkerLoop(jobs));
+            }
+
+            public void Compress(int level, int tx, int tz,
+                NativeArray<Color32> pxA, NativeArray<Color32> pxN, TextureCompressionQuality quality)
+            {
+                string stem = $"l{level}_{tx}_{tz}";
+                var item = new Item
+                {
+                    level = level, tx = tx, tz = tz, quality = quality,
+                    inA = Path.Combine(_tmpDir, stem + "_a" + _encA.InExt),
+                    inN = Path.Combine(_tmpDir, stem + "_n" + _encN.InExt),
+                    outA = Path.Combine(_tmpDir, stem + "_a" + _encA.OutExt),
+                    outN = Path.Combine(_tmpDir, stem + "_n" + _encN.OutExt),
+                };
+                _encA.WriteInput(item.inA, pxA, _tileRes);
+                _encN.WriteInput(item.inN, pxN, _tileRes);
+                _queue.Add(item);
+                ++_queued;
+                DrainCompleted();
+            }
+
+            private void WorkerLoop(int jobs)
+            {
+                foreach (var item in _queue.GetConsumingEnumerable())
+                {
+                    if (_abandoned) { CleanupFiles(item); continue; }
+                    string errN = null;
+                    bool okA = _encA.Run(item.inA, item.outA, true, item.quality, jobs, out string errA);
+                    bool okN = okA && _encN.Run(item.inN, item.outN, false, item.quality, jobs, out errN);
+                    item.error = errA ?? errN;
+                    if (okA && okN)
+                    {
+                        try
+                        {
+                            item.dataA = File.ReadAllBytes(item.outA);
+                            item.dataN = File.ReadAllBytes(item.outN);
+                            item.offA = _encA.DataOffset(item.dataA);
+                            item.offN = _encN.DataOffset(item.dataN);
+                            item.ok = item.offA >= 0 && item.offN >= 0
+                                && item.dataA.Length > item.offA && item.dataN.Length > item.offN;
+                            if (!item.ok) item.error = "编码输出非法";
+                        }
+                        catch (System.Exception ex) { item.error = ex.Message; }
+                    }
+                    _completed.Enqueue(item);
+                }
+            }
+
+            /// <summary>主线程：回收完成的瓦片写入归档；失败片读回中间文件用 Unity 压缩兜底。</summary>
+            private void DrainCompleted()
+            {
+                while (_completed.TryDequeue(out var item))
+                {
+                    ++_drained;
+                    if (item.ok)
+                    {
+                        long offset = _arc.Position;
+                        int lenA = item.dataA.Length - item.offA, lenN = item.dataN.Length - item.offN;
+                        _arc.Write(item.dataA, item.offA, lenA);
+                        _arc.Write(item.dataN, item.offN, lenN);
+                        _arc.AddRecord(item.level, item.tx, item.tz, offset, lenA, lenN);
+                    }
+                    else
+                    {
+                        Debug.LogWarning($"[ClipmapBaker] 外部编码失败 l{item.level}_{item.tx}_{item.tz}" +
+                                         $"（{item.error}），回退 Unity 压缩");
+                        var pxA = _encA.ReadPixels(item.inA, _tileRes);
+                        var pxN = _encN.ReadPixels(item.inN, _tileRes);
+                        AppendTileCompressed(_arc, item.level, item.tx, item.tz,
+                            pxA, pxN, _tileRes, _encA.Format, _encN.Format, item.quality);
+                        pxA.Dispose(); pxN.Dispose();
+                    }
+                    CleanupFiles(item);
+                }
+            }
+
+            public void Flush()
+            {
+                _queue.CompleteAdding();
+                var sw = System.Diagnostics.Stopwatch.StartNew();
+                while (!System.Threading.Tasks.Task.WaitAll(_workers, 100))
+                {
+                    DrainCompleted();
+                    EditorUtility.DisplayCancelableProgressBar("瓦片金字塔",
+                        $"外部编码收尾（剩余 {PendingCount}）", 0.99f);
+                }
+                DrainCompleted();
+                if (_queued > 0)
+                    Debug.Log($"[ClipmapBaker] 外部编码收尾：{_queued} 任务（耗时 {sw.Elapsed.TotalSeconds:F1}s）");
+            }
+
+            public void Dispose()
+            {
+                _abandoned = true;
+                if (!_queue.IsAddingCompleted) _queue.CompleteAdding();
+                MTAstcEncoder.KillAllProcesses();
+                try { System.Threading.Tasks.Task.WaitAll(_workers, 5000); } catch (System.Exception) { }
+                DrainCompleted(); // 已完成结果仍写入归档（取消路径也保持 bin/idx 一致）
+                _queue.Dispose();
+                try { if (Directory.Exists(_tmpDir)) Directory.Delete(_tmpDir, true); }
+                catch (System.Exception) { /* 杀毒软件占用等，下轮启动无关 */ }
+            }
+
+            private static void TryDelete(string path)
+            {
+                try { if (path != null && File.Exists(path)) File.Delete(path); }
+                catch (System.Exception) { }
+            }
+
+            private static void CleanupFiles(Item item)
+            {
+                TryDelete(item.inA); TryDelete(item.inN);
+                TryDelete(item.outA); TryDelete(item.outN);
+            }
+        }
 
         /// <summary>(q×q) 小块写入父缓冲（(2q)×(2q)）的 (qx,qz) 象限。</summary>
         private static void CopyQuadrantSmall(NativeArray<Color32> src, NativeArray<Color32> dst, int q, int qx, int qz)
@@ -626,11 +1134,28 @@ namespace MightyTerrainMesh.EditorTools
             SaveClipmapTex(px, res, path, sRGB, targetFmt, mipChain, quality, true, out raw);
         }
 
+        // 压缩用 Texture2D 缓存：每瓦片 new/DestroyImmediate 一张 2040² RGBA32（16MB）churn 太大，
+        // 按 (res, mipChain, linear) 复用（域重载自动清理）。压缩格式逐次调用指定，与缓存键无关。
+        private static readonly Dictionary<long, Texture2D> _bakeTexCache = new Dictionary<long, Texture2D>();
+
+        private static Texture2D GetBakeTex(int res, bool mipChain, bool linear)
+        {
+            long key = ((long)res << 2) | (mipChain ? 2 : 0) | (linear ? 1 : 0);
+            if (!_bakeTexCache.TryGetValue(key, out var tex) || tex == null)
+            {
+                tex = new Texture2D(res, res, TextureFormat.RGBA32, mipChain, linear);
+                _bakeTexCache[key] = tex;
+            }
+            // 上次调用可能已把纹理压成 ASTC/BC7，复用前重置回 RGBA32（SetPixelData 要求格式与数据匹配）
+            else tex.Reinitialize(res, res, TextureFormat.RGBA32, mipChain);
+            return tex;
+        }
+
         private static void SaveClipmapTex(NativeArray<Color32> px, int res, string path, bool sRGB,
             TextureFormat targetFmt, bool mipChain, TextureCompressionQuality quality,
             bool captureRaw, out byte[] raw)
         {
-            var tex = new Texture2D(res, res, TextureFormat.RGBA32, mipChain, !sRGB);
+            var tex = GetBakeTex(res, mipChain, !sRGB);
             tex.SetPixelData(px, 0);
             tex.Apply(mipChain); // mipChain=true 时离线生成完整 Mip 链（§4.1）
             if (targetFmt != TextureFormat.RGBA32)
@@ -638,7 +1163,6 @@ namespace MightyTerrainMesh.EditorTools
             var nativeRaw = tex.GetRawTextureData<byte>();
             raw = captureRaw ? nativeRaw.ToArray() : null;
             WriteRaw(path, nativeRaw);
-            Object.DestroyImmediate(tex);
         }
 
         private static unsafe void WriteRaw(string path, NativeArray<byte> raw)
@@ -815,6 +1339,19 @@ namespace MightyTerrainMesh.EditorTools
                 return assetPath;
             }
             return Application.dataPath + assetPath.Substring("Assets".Length);
+        }
+
+        /// <summary>
+        /// Resources 输出根 → 对应 StreamingAssets 目录（瓦片归档 tiles.bin/tiles.idx 的位置）。
+        /// 归档必须经 File IO 读取：构建后 Resources 被打包不可按路径访问，StreamingAssets 保留为文件。
+        /// </summary>
+        public static string StreamingRootOf(string outputRoot)
+        {
+            string p = outputRoot.Replace('\\', '/');
+            const string seg = "/Resources/";
+            int i = p.IndexOf(seg, System.StringComparison.Ordinal);
+            string rel = i >= 0 ? p.Substring(i + seg.Length) : new DirectoryInfo(outputRoot).Name;
+            return "Assets/StreamingAssets/" + rel;
         }
 
         // ============================================================

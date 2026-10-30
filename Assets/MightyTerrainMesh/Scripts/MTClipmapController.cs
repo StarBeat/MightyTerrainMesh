@@ -67,8 +67,10 @@ namespace MightyTerrainMesh
         public int stripChunkTexels = 120;
 
         [Header("带宽门闸（§8.1）")]
-        [Tooltip("帧时 EMA 预算(ms)；连续超限触发降级：① 混合带 25%→20% ② 静态层 Aniso 2→1")]
+        [Tooltip("帧时 EMA 预算(ms)；连续超限触发降级：① 混合带 25%→20% ② 静态层 Aniso 2→1；持续低于 80% 预算则逐级恢复")]
         public float frameBudgetMs = 33f;
+        [Tooltip("预测性预取前瞻（秒，0=关闭）：按相机速度提前请求前方窗口瓦片，减少未驻留导致的粗层回退")]
+        public float prefetchAheadSeconds = 0.5f;
 
         public enum DebugLodMode { Off, Requested, Actual }
 
@@ -106,9 +108,10 @@ namespace MightyTerrainMesh
         private int _blockA = 1, _blockN = 1; // 直拷块对齐约束（ASTC 6/5，BC7 4/4，RGBA32 1=无约束）
         private double _bptPair;        // 双图每 texel 字节数（ASTC≈1.084 / BC7=2 / RGBA32=8），字节预算用
         private bool _alignWarned;
-        private int _l8Aniso = 2;       // §6.4：静态层 Aniso 2x（门闸降级②可降为 1）
+        private int _l8Aniso = 2;       // §6.4：静态层 Aniso 2x（门闸降级②可降为 1，恢复时回升）
         private float _emaMs = 16f;     // 帧时 EMA（带宽门闸）
-        private int _overFrames, _governorStep;
+        private int _overFrames, _underFrames, _governorStep;
+        private Vector2 _camVel;        // 相机水平速度（米/秒，预测性预取用；传送帧清零）
 
         // ---------------------------------------------------------
 
@@ -252,7 +255,11 @@ namespace MightyTerrainMesh
                 _origins[k] = ComputeOrigin(camLocal, k);
 
             // 传送检测（§5.4：阈值 = footprint(L0) = 32m）→ 全层失效，恢复循环按 粗→细 分带重填
-            if ((cam - _prevCamPos).sqrMagnitude > baseFootprint * baseFootprint)
+            bool teleported = (cam - _prevCamPos).sqrMagnitude > baseFootprint * baseFootprint;
+            // 相机水平速度（预测性预取用）；传送帧位移不是速度，清零避免一次性请求远端瓦片
+            _camVel = !teleported && Time.unscaledDeltaTime > 1e-5f
+                ? (cam - _prevCamPos) / Time.unscaledDeltaTime : Vector2.zero;
+            if (teleported)
                 for (int k = 0; k < _levelCount; ++k)
                 {
                     _prevOrigins[k] = _origins[k];
@@ -262,7 +269,11 @@ namespace MightyTerrainMesh
 
             var ops = _ops;
             ops.Clear();
-            long budgetLeft = uploadBudgetBytes;
+            // 自适应上传预算（§8.2）：帧时宽裕放宽 1.5×（加速流式/恢复），紧张收紧 0.5×（让出主线程）
+            long frameBudget = uploadBudgetBytes;
+            if (_emaMs > frameBudgetMs) frameBudget >>= 1;
+            else if (_emaMs < frameBudgetMs * 0.7f) frameBudget += frameBudget >> 1;
+            long budgetLeft = frameBudget;
             long collected = 0;
 
             // 无效层恢复（粗→细优先）：整层按字节预算分横带、每帧每层最多一带、多帧完成（§8.2）；
@@ -321,6 +332,14 @@ namespace MightyTerrainMesh
             int mask = 1 << _levelCount;
             for (int k = 0; k < _levelCount; ++k) if (_layerValid[k]) mask |= 1 << k;
             Shader.SetGlobalInt("_ClipValidMask", mask);
+
+            // 预测性预取：按当前速度请求前瞻位置的各层窗口瓦片（已驻留/在途自动去重，仅排队不进预算）
+            if (_useCopy && prefetchAheadSeconds > 0f && _camVel.sqrMagnitude > 0.25f)
+            {
+                Vector2 aheadLocal = camLocal + _camVel * prefetchAheadSeconds;
+                for (int k = 0; k < _levelCount; ++k)
+                    RequestWindowTiles(k, ComputeOrigin(aheadLocal, k));
+            }
         }
 
         // ---------------------------------------------------------
@@ -336,10 +355,38 @@ namespace MightyTerrainMesh
             _emaMs = Mathf.Lerp(_emaMs, Time.unscaledDeltaTime * 1000f, 0.05f);
             if (_emaMs > frameBudgetMs)
             {
+                _underFrames = 0;
                 if (++_overFrames >= 90 && _governorStep < 2)
                     ApplyGovernorStep(++_governorStep);
             }
-            else _overFrames = 0;
+            else
+            {
+                _overFrames = 0;
+                // 恢复（带回滞，避免在阈值附近来回抖）：帧时持续低于 80% 预算 600 帧 → 回退一级降级
+                if (_governorStep > 0 && _emaMs < frameBudgetMs * 0.8f)
+                {
+                    if (++_underFrames >= 600)
+                        RevertGovernorStep(--_governorStep);
+                }
+                else _underFrames = 0;
+            }
+        }
+
+        void RevertGovernorStep(int step)
+        {
+            _underFrames = 0;
+            if (step == 1) // 从②回到①：静态层 Aniso 恢复 2x
+            {
+                _l8Aniso = 2;
+                if (_albedoL8 != null) _albedoL8.anisoLevel = 2;
+                if (_normalL8 != null) _normalL8.anisoLevel = 2;
+                Debug.Log("[MTClipmap] 带宽门闸恢复：静态层 Aniso 回到 2（§8.1）");
+            }
+            else // 从①回到无降级：混合带恢复 25%
+            {
+                Shader.SetGlobalFloat("_ClipBlendStart", 0.75f);
+                Debug.Log("[MTClipmap] 带宽门闸恢复：混合带回到 25%（§8.1）");
+            }
         }
 
         void ApplyGovernorStep(int step)
@@ -455,7 +502,7 @@ namespace MightyTerrainMesh
             return ready;
         }
 
-        /// <summary>估算层 k 从上次吸附原点移到 cur 的条带字节量（含角上双写，§5.2）；超窗移动置 needsFull。</summary>
+        /// <summary>估算层 k 从上次吸附原点移到 cur 的条带字节量（角区已裁剪，无双写）；超窗移动置 needsFull。</summary>
         long EstimateStripBytes(int k, Vector2 cur, out bool needsFull)
         {
             needsFull = false;
@@ -467,7 +514,7 @@ namespace MightyTerrainMesh
             int dz = Mathf.RoundToInt((cur.y - prev.y) / texel);
             if (dx == 0 && dz == 0) return 0;
             if (Mathf.Abs(dx) >= res || Mathf.Abs(dz) >= res) { needsFull = true; return 0; }
-            double texels = (double)Mathf.Abs(dx) * res + (double)res * Mathf.Abs(dz);
+            double texels = (double)Mathf.Abs(dx) * res + (double)(res - Mathf.Abs(dx)) * Mathf.Abs(dz);
             return (long)(texels * _bptPair);
         }
 
@@ -503,17 +550,20 @@ namespace MightyTerrainMesh
             }
             if (dz != 0)
             {
-                // 横条带：全宽（角上重叠区写两次，§5.2 明确允许，避免象限裁剪的边界错误）
+                // 横条带：角区 |dx| 列已由同批竖条带写入（同层条带原子提交、竖条带在前），裁剪掉避免双写
                 int hTotal = Mathf.Abs(dz);
+                int clipX = Mathf.Abs(dx);
                 float regionMinZ = dz > 0 ? cur.y + Footprint(k) - hTotal * texel : cur.y;
-                int dstX = WrapTexel(cur.x / texel, res);
+                float rowMinX = dx < 0 ? cur.x + clipX * texel : cur.x;
+                int rowW = res - clipX;
+                int dstX = WrapTexel(rowMinX / texel, res);
                 int done = 0;
                 while (done < hTotal)
                 {
                     int ch = Mathf.Min(stripChunkTexels, hTotal - done);
                     float wz = regionMinZ + done * texel;
-                    AddWrapOps(ops, k, StripKind.Row, dstX, WrapTexel(wz / texel, res), res, ch,
-                        WorldOf(cur.x, wz), texel);
+                    AddWrapOps(ops, k, StripKind.Row, dstX, WrapTexel(wz / texel, res), rowW, ch,
+                        WorldOf(rowMinX, wz), texel);
                     done += ch;
                 }
             }

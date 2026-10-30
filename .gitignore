@@ -17,3 +17,7 @@ ProjectSettings/CommonBurstAotSettings.json
 PPv2URPConverters.csproj
 UnityEngine.UI.csproj
 *.csproj
+
+# ClipmapVT 烘焙产物（tiles.bin 单文件超 Git 100MB 限制，可重新烘焙生成）
+Assets/StreamingAssets/
+Assets/StreamingAssets.meta

@@ -4,6 +4,7 @@ namespace MightyTerrainMesh
     using System.Collections.Generic;
     using System.IO;
     using Unity.Collections;
+    using Unity.Collections.LowLevel.Unsafe;
     using Unity.Mathematics;
     using UnityEngine;
 
@@ -11,7 +12,9 @@ namespace MightyTerrainMesh
     /// Clipmap 烘焙清单（对应 ClipmapVT.md §7.1 数据契约）。
     /// 文件布局（Resources/&lt;root&gt;/ 下）：
     ///   manifest.json / l7_albedo.bytes / l7_normal.bytes / l8_albedo.bytes / l8_normal.bytes
-    ///   block_{i}_albedo.bytes / block_{i}_normal.bytes
+    ///   block_{i}_albedo.bytes / block_{i}_normal.bytes（旧数据）
+    /// 瓦片金字塔：tileArchive=1 时存于 StreamingAssets/&lt;root&gt;/tiles.bin + tiles.idx（File IO 流式）；
+    /// 否则为旧版逐文件 Resources/&lt;root&gt;/tiles/l{j}_{x}_{z}_{albedo|normal}.bytes。
     /// 纹理 .bytes 仅含 GetRawTextureData 字节流；尺寸由各级分辨率字段提供，格式由 texFormat/texFormatN 提供。
     /// </summary>
     [Serializable]
@@ -32,6 +35,9 @@ namespace MightyTerrainMesh
         public int tileRes;
         public float tileWorld0;
         public int tileLevels;
+        // 1 = 瓦片存于 StreamingAssets 归档（tiles.bin/tiles.idx，File IO 异步直读）；
+        // 0 / 字段缺失 = 旧版逐文件 tiles/ 目录（Resources.LoadAsync）。
+        public int tileArchive;
         // albedo / normal 的 TextureFormat 枚举值（ASTC 6x6/5x5、BC7/BC7 或 RGBA32/RGBA32）。
         public int texFormat;
         public int texFormatN;
@@ -87,17 +93,34 @@ namespace MightyTerrainMesh
         private int _tileRes;
         private float _tileWorld0;
         private int _tileLevels;
-        private const int MaxInFlightTiles = 4;
+        private const int MaxInFlightTiles = 8;             // 归档读为本地 IO，放宽在途数
+        private const long MaxFinishBytesPerFrame = 8L << 20; // 每帧瓦片收尾（建纹理+上传）字节预算，至少完成 1 片
+        private const int LevelProtectionFrames = 300;      // LRU 分级：每级附加保鲜帧数（粗级覆盖大，更难淘汰）
         private int _tileBudget = 64;   // 驻留、排队和在途条目的总预算（对）
         private readonly Dictionary<long, TileEntry> _tiles = new Dictionary<long, TileEntry>();
         private readonly List<TileEntry> _loading = new List<TileEntry>();
         private readonly Queue<TileEntry> _pendingLoads = new Queue<TileEntry>();
 
+        // 归档模式（StreamingAssets/tiles.bin + tiles.idx）：后台线程直读原生内存，
+        // 零受管 byte[] 分配（旧路径每片 4–8MB 进 LOH）；索引缺失时自动回退逐文件 Resources 模式。
+        // 注意：Android 的 StreamingAssets 在 APK 内不可 File IO，会自动回退逐文件模式
+        // （如需归档，启动时先把 tiles.bin/idx 拷到 persistentDataPath）。
+        private bool _archiveMode;
+        private string _archiveBinPath;
+        private class TileLoc { public long offset; public int lenA, lenN; }
+        private class TilePayload { public NativeArray<byte> a, n; }
+        private readonly Dictionary<long, TileLoc> _tileLocs = new Dictionary<long, TileLoc>();
+        // 瓦片纹理池：LRU 淘汰不销毁，归还池复用（尺寸/格式固定），省驱动级纹理创建/销毁
+        private readonly Stack<Texture2D> _poolA = new Stack<Texture2D>();
+        private readonly Stack<Texture2D> _poolN = new Stack<Texture2D>();
+
         private class TileEntry
         {
             public int level, tx, tz;
             public Texture2D texA, texN;            // 非 null = 已驻留（格式 = 环面目标格式）
-            public ResourceRequest reqA, reqN;
+            public ResourceRequest reqA, reqN;      // 逐文件模式
+            public System.Threading.Tasks.Task<TilePayload> task; // 归档模式
+            public long payloadBytes;               // 收尾时统计（每帧收尾预算用）
             public int lastUsedFrame;
             public bool requested;      // 已排队或在途，防止重复请求
             public bool failed;
@@ -337,6 +360,7 @@ namespace MightyTerrainMesh
 
             if (s._hasPyramid)
             {
+                s.TryLoadArchive(resourcesRoot);
                 // 直拷模式（§7.1）：更新走 Graphics.CopyTexture，Job 采样永不执行——
                 // 跳过 L7 全图与高精块的 CPU 像素加载（2040² 下约 33MB+ 死内存）
                 s._l7A = new NativeArray<Color32>(0, Allocator.Persistent);
@@ -436,16 +460,66 @@ namespace MightyTerrainMesh
             return false;
         }
 
-        /// <summary>每帧最多完成一对纹理，并补足在途请求，限制上传尖峰和 IO 并发。</summary>
+        /// <summary>读取瓦片归档索引（StreamingAssets/tiles.idx）。失败或缺失时保持逐文件模式。</summary>
+        private void TryLoadArchive(string resourcesRoot)
+        {
+            string dir = Path.Combine(Application.streamingAssetsPath, resourcesRoot);
+            string idxPath = Path.Combine(dir, "tiles.idx");
+            if (!File.Exists(idxPath)) return;
+            try
+            {
+                var bytes = File.ReadAllBytes(idxPath);
+                int p = 0;
+                if (bytes.Length < 12 || BitConverter.ToInt32(bytes, p) != 0x4954544D) // 'MTTI'
+                {
+                    Debug.LogWarning("[ClipmapSource] tiles.idx 魔数不匹配，回退逐文件模式");
+                    return;
+                }
+                p += 4;
+                int ver = BitConverter.ToInt32(bytes, p); p += 4;
+                if (ver != 1)
+                {
+                    Debug.LogWarning($"[ClipmapSource] tiles.idx 版本 {ver} 不支持，回退逐文件模式");
+                    return;
+                }
+                int count = BitConverter.ToInt32(bytes, p); p += 4;
+                for (int i = 0; i < count; ++i)
+                {
+                    int level = BitConverter.ToInt32(bytes, p); p += 4;
+                    int tx = BitConverter.ToInt32(bytes, p); p += 4;
+                    int tz = BitConverter.ToInt32(bytes, p); p += 4;
+                    long offset = BitConverter.ToInt64(bytes, p); p += 8;
+                    int lenA = BitConverter.ToInt32(bytes, p); p += 4;
+                    int lenN = BitConverter.ToInt32(bytes, p); p += 4;
+                    _tileLocs[TileKey(level, tx, tz)] = new TileLoc { offset = offset, lenA = lenA, lenN = lenN };
+                }
+                _archiveBinPath = Path.Combine(dir, "tiles.bin");
+                _archiveMode = true;
+                Debug.Log($"[ClipmapSource] 瓦片归档模式：{count} 片 ← {idxPath}");
+            }
+            catch (Exception e)
+            {
+                _tileLocs.Clear();
+                Debug.LogWarning($"[ClipmapSource] tiles.idx 读取失败，回退逐文件模式：{e.Message}");
+            }
+        }
+
+        /// <summary>每帧收尾已完成的瓦片（字节预算内尽量多，至少 1 片；FIFO 先等先收尾），并补足在途请求。</summary>
         public void Update()
         {
-            for (int i = _loading.Count - 1; i >= 0; --i)
+            long finishedBytes = 0;
+            int i = 0;
+            while (i < _loading.Count)
             {
                 var e = _loading[i];
-                if (!e.reqA.isDone || !e.reqN.isDone) continue;
-                _loading.RemoveAt(i);
+                bool done = _archiveMode
+                    ? e.task != null && e.task.IsCompleted
+                    : e.reqA != null && e.reqN != null && e.reqA.isDone && e.reqN.isDone;
+                if (!done) { ++i; continue; }
+                _loading.RemoveAt(i); // 不 ++i：后继元素移入当前位置
                 FinishLoadTile(e);
-                break;
+                finishedBytes += e.payloadBytes;
+                if (finishedBytes >= MaxFinishBytesPerFrame) break; // 预算只挡后续，每帧至少完成 1 片
             }
             PumpTileRequests();
         }
@@ -484,28 +558,87 @@ namespace MightyTerrainMesh
             {
                 var e = _pendingLoads.Dequeue();
                 if (e.texA != null) { e.requested = false; continue; }
-                string basePath = $"{_bakedRoot}/tiles/l{e.level}_{e.tx}_{e.tz}";
-                e.reqA = Resources.LoadAsync<TextAsset>(basePath + "_albedo");
-                e.reqN = Resources.LoadAsync<TextAsset>(basePath + "_normal");
+                if (_archiveMode)
+                {
+                    if (!_tileLocs.TryGetValue(TileKey(e.level, e.tx, e.tz), out var loc))
+                    {
+                        // 索引缺失（区域模式之外/数据不全）：按失败退避处理，与逐文件模式语义一致
+                        e.requested = false;
+                        MarkLoadFailed(e);
+                        continue;
+                    }
+                    e.task = System.Threading.Tasks.Task.Run(() => ReadTilePayload(loc));
+                }
+                else
+                {
+                    string basePath = $"{_bakedRoot}/tiles/l{e.level}_{e.tx}_{e.tz}";
+                    e.reqA = Resources.LoadAsync<TextAsset>(basePath + "_albedo");
+                    e.reqN = Resources.LoadAsync<TextAsset>(basePath + "_normal");
+                }
                 _loading.Add(e);
+            }
+        }
+
+        /// <summary>后台线程：从 tiles.bin 直读一片瓦片到原生内存（全程无受管 byte[] 分配）。</summary>
+        private TilePayload ReadTilePayload(TileLoc loc)
+        {
+            TilePayload p = null;
+            try
+            {
+                p = new TilePayload
+                {
+                    a = new NativeArray<byte>(loc.lenA, Allocator.Persistent, NativeArrayOptions.UninitializedMemory),
+                    n = new NativeArray<byte>(loc.lenN, Allocator.Persistent, NativeArrayOptions.UninitializedMemory),
+                };
+                using (var fs = new FileStream(_archiveBinPath, FileMode.Open, FileAccess.Read, FileShare.Read,
+                           1 << 16, FileOptions.RandomAccess))
+                {
+                    fs.Seek(loc.offset, SeekOrigin.Begin);
+                    ReadFully(fs, p.a);
+                    ReadFully(fs, p.n);
+                }
+                return p;
+            }
+            catch (Exception)
+            {
+                if (p != null)
+                {
+                    if (p.a.IsCreated) p.a.Dispose();
+                    if (p.n.IsCreated) p.n.Dispose();
+                }
+                return null;
+            }
+        }
+
+        private static unsafe void ReadFully(FileStream fs, NativeArray<byte> buf)
+        {
+            var span = new Span<byte>((byte*)NativeArrayUnsafeUtility.GetUnsafePtr(buf), buf.Length);
+            int read = 0;
+            while (read < span.Length)
+            {
+                int r = fs.Read(span.Slice(read));
+                if (r <= 0) throw new EndOfStreamException("tiles.bin 数据截断");
+                read += r;
             }
         }
 
         private void FinishLoadTile(TileEntry e)
         {
+            if (_archiveMode) { FinishLoadTileArchive(e); return; }
             var ta = e.reqA.asset as TextAsset;
             var tn = e.reqN.asset as TextAsset;
             e.reqA = null; e.reqN = null;
             e.requested = false;
+            e.payloadBytes = (ta != null && ta.bytes != null ? ta.bytes.LongLength : 0)
+                           + (tn != null && tn.bytes != null ? tn.bytes.LongLength : 0);
             try
             {
                 if (ta == null || tn == null) { MarkLoadFailed(e); return; }
-                e.texA = CreateTileTexture(ta.bytes, true, TileFormatA);
-                e.texN = CreateTileTexture(tn.bytes, false, TileFormatN);
+                e.texA = CreateTileTexture(ta.bytes, true, TileFormatA, _poolA);
+                e.texN = CreateTileTexture(tn.bytes, false, TileFormatN, _poolN);
                 if (e.texA == null || e.texN == null)
                 {
-                    if (e.texA != null) { UnityEngine.Object.Destroy(e.texA); e.texA = null; }
-                    if (e.texN != null) { UnityEngine.Object.Destroy(e.texN); e.texN = null; }
+                    ReturnTileTextures(e);
                     MarkLoadFailed(e);
                     return;
                 }
@@ -519,6 +652,40 @@ namespace MightyTerrainMesh
             }
         }
 
+        private void FinishLoadTileArchive(TileEntry e)
+        {
+            var p = e.task != null && e.task.Status == System.Threading.Tasks.TaskStatus.RanToCompletion
+                ? e.task.Result : null;
+            if (e.task != null && e.task.IsFaulted)
+            {
+                // 读取 Exception 以标记"已观察"（防 UnobservedTaskException），并留下诊断
+                Debug.LogWarning($"[ClipmapSource] 瓦片 l{e.level}_{e.tx}_{e.tz} 归档读取异常：" +
+                                 $"{e.task.Exception?.InnerException?.Message}");
+            }
+            e.task = null;
+            e.requested = false;
+            if (p == null) { e.payloadBytes = 0; MarkLoadFailed(e); return; }
+            e.payloadBytes = p.a.Length + p.n.Length;
+            e.texA = CreateTileTexture(p.a, true, TileFormatA, _poolA);
+            e.texN = CreateTileTexture(p.n, false, TileFormatN, _poolN);
+            p.a.Dispose(); p.n.Dispose();
+            if (e.texA == null || e.texN == null)
+            {
+                ReturnTileTextures(e);
+                MarkLoadFailed(e);
+                return;
+            }
+            e.failCount = 0;
+            e.lastUsedFrame = Time.frameCount;
+        }
+
+        /// <summary>半失败收尾：已建纹理归还池（不 Destroy，避免驱动级churn）。</summary>
+        private void ReturnTileTextures(TileEntry e)
+        {
+            if (e.texA != null) { _poolA.Push(e.texA); e.texA = null; }
+            if (e.texN != null) { _poolN.Push(e.texN); e.texN = null; }
+        }
+
         /// <summary>加载失败：线性退避后重试（1s 起、上限 10s），避免单文件缺失导致所属层永久失效。</summary>
         private void MarkLoadFailed(TileEntry e)
         {
@@ -530,16 +697,51 @@ namespace MightyTerrainMesh
                 Debug.LogWarning($"[ClipmapSource] 瓦片 l{e.level}_{e.tx}_{e.tz} 加载失败（第 {e.failCount} 次），{delayFrames / 60f:0}s 后重试");
         }
 
-        /// <summary>按 manifest 的分辨率和格式从纯 raw 数据创建瓦片纹理，目标平台须支持所选格式。</summary>
-        private Texture2D CreateTileTexture(byte[] bytes, bool sRGB, TextureFormat expectFmt)
+        /// <summary>按 manifest 的分辨率和格式从纯 raw 数据创建瓦片纹理（优先从池复用，目标平台须支持所选格式）。</summary>
+        private Texture2D CreateTileTexture(byte[] bytes, bool sRGB, TextureFormat expectFmt, Stack<Texture2D> pool)
         {
             if (bytes == null || bytes.Length == 0) return null;
+            var t = TakeFromPool(pool, sRGB, expectFmt);
+            if (t == null) return null;
+            try
+            {
+                LoadRawPayload(t, bytes);
+                t.Apply(false);
+                return t;
+            }
+            catch (Exception e)
+            {
+                UnityEngine.Object.Destroy(t);
+                Debug.LogWarning($"[ClipmapSource] 瓦片纹理创建失败：{e.Message}");
+                return null;
+            }
+        }
+
+        private unsafe Texture2D CreateTileTexture(NativeArray<byte> data, bool sRGB, TextureFormat expectFmt, Stack<Texture2D> pool)
+        {
+            if (!data.IsCreated || data.Length == 0) return null;
+            var t = TakeFromPool(pool, sRGB, expectFmt);
+            if (t == null) return null;
+            try
+            {
+                t.LoadRawTextureData((IntPtr)NativeArrayUnsafeUtility.GetUnsafeReadOnlyPtr(data), data.Length);
+                t.Apply(false);
+                return t;
+            }
+            catch (Exception e)
+            {
+                UnityEngine.Object.Destroy(t);
+                Debug.LogWarning($"[ClipmapSource] 瓦片纹理创建失败：{e.Message}");
+                return null;
+            }
+        }
+
+        private Texture2D TakeFromPool(Stack<Texture2D> pool, bool sRGB, TextureFormat expectFmt)
+        {
             Texture2D t = null;
             try
             {
-                t = new Texture2D(_tileRes, _tileRes, expectFmt, false, !sRGB);
-                LoadRawPayload(t, bytes);
-                t.Apply(false);
+                t = pool.Count > 0 ? pool.Pop() : new Texture2D(_tileRes, _tileRes, expectFmt, false, !sRGB);
                 t.wrapMode = TextureWrapMode.Clamp;
                 t.filterMode = FilterMode.Bilinear;
                 return t;
@@ -558,20 +760,23 @@ namespace MightyTerrainMesh
                 tex.LoadRawTextureData((IntPtr)data, bytes.Length);
         }
 
-        /// <summary>淘汰最久未用的驻留瓦片（本帧在用或加载中的跳过；都在用则暂时超支）。</summary>
+        /// <summary>淘汰最久未用的驻留瓦片（本帧在用或加载中的跳过；都在用则暂时超支）。
+        /// 分级：粗级（level 大）覆盖范围大、复用率高，附加保鲜帧；纹理归还池而非销毁。</summary>
         private void EvictLRU()
         {
             TileEntry victim = null;
             long victimKey = 0;
+            long bestScore = long.MaxValue;
             foreach (var kv in _tiles)
             {
                 var e = kv.Value;
                 if (e.texA == null || e.lastUsedFrame >= Time.frameCount) continue;
-                if (victim == null || e.lastUsedFrame < victim.lastUsedFrame) { victim = e; victimKey = kv.Key; }
+                long score = e.lastUsedFrame + (long)e.level * LevelProtectionFrames;
+                if (score < bestScore) { bestScore = score; victim = e; victimKey = kv.Key; }
             }
             if (victim == null) return;
-            UnityEngine.Object.Destroy(victim.texA);
-            UnityEngine.Object.Destroy(victim.texN);
+            _poolA.Push(victim.texA);
+            _poolN.Push(victim.texN);
             _tiles.Remove(victimKey);
         }
 
@@ -669,8 +874,28 @@ namespace MightyTerrainMesh
                 if (kv.Value.texN != null) UnityEngine.Object.Destroy(kv.Value.texN);
             }
             _tiles.Clear();
+            // 在途归档任务：等待完成并释放其原生缓冲，否则 Persistent NativeArray 泄漏（每片约 4–8MB）
+            foreach (var e in _loading)
+            {
+                if (e.task == null) continue;
+                try
+                {
+                    var p = e.task.Result; // 阻塞至完成（本地 IO，毫秒级）；失败任务抛异常进 catch
+                    if (p != null)
+                    {
+                        if (p.a.IsCreated) p.a.Dispose();
+                        if (p.n.IsCreated) p.n.Dispose();
+                    }
+                }
+                catch (Exception) { /* 失败任务无 payload 需要释放 */ }
+                e.task = null;
+            }
             _loading.Clear();
             _pendingLoads.Clear();
+            foreach (var t in _poolA) if (t != null) UnityEngine.Object.Destroy(t);
+            foreach (var t in _poolN) if (t != null) UnityEngine.Object.Destroy(t);
+            _poolA.Clear();
+            _poolN.Clear();
         }
 
         private static void DisposeIf<T>(ref NativeArray<T> arr) where T : struct

@@ -36,6 +36,7 @@ namespace MightyTerrainMesh.EditorTools
         private int _l7Res = 512;
         private int _l8Res = 2040;
         private MTTerrainBakePipeline.ClipmapBakeFormat _bakeFormat = MTTerrainBakePipeline.ClipmapBakeFormat.ASTC;
+        private TextureCompressionQuality _fineQuality = TextureCompressionQuality.Fast;
         private bool _bakePyramid = true;
         private bool _pyramidFull = false; // D8：默认区域高精包（regions 内 L0 高精，粗级全量）
         private int _coarseFullFrom = 3;   // 粗级全量起始级（j≥此级全网格直接烘焙）
@@ -139,8 +140,12 @@ namespace MightyTerrainMesh.EditorTools
                         MTTerrainBakePipeline.RecommendClipmapResolutions(ts, out _l7Res, out _l8Res);
                 }
                 _bakeFormat = (MTTerrainBakePipeline.ClipmapBakeFormat)EditorGUILayout.EnumPopup(
-                    new GUIContent("压缩格式（§10）", "ASTC=移动端；BC7=DX/桌面；RGBA32=未压缩。目标平台必须支持所选格式"),
+                    new GUIContent("压缩格式（§10）", "ASTC=移动端；BC7=DX/桌面；RGBA32=未压缩。目标平台必须支持所选格式。" +
+                        "ASTC/BC7 分别可由 astcenc/Compressonator 外部编码器并行加速（MightyTerrainMesh 菜单下载）"),
                     _bakeFormat);
+                _fineQuality = (TextureCompressionQuality)EditorGUILayout.EnumPopup(
+                    new GUIContent("L0 压缩质量", "ASTC 压缩耗时大头：Fast ≈ Normal 的 1/4~1/6；最终资产可换 Normal 重烘（≥L1 恒为 Fast）"),
+                    _fineQuality);
                 _bakePyramid = EditorGUILayout.ToggleLeft(
                     "瓦片金字塔（§7.1 流式契约：L0 = 32m@2040²，运行时异步流式 + 直拷）", _bakePyramid);
                 if (_bakePyramid && _terrain != null)
@@ -241,7 +246,7 @@ namespace MightyTerrainMesh.EditorTools
             // ② Clipmap 纹理
             if (_bakeClipmap)
                 MTTerrainBakePipeline.BakeClipmap(_terrain, _l7Res, _l8Res, _bakeFormat, _clipmapDir,
-                    _regions, _bakePyramid, _pyramidFull, _coarseFullFrom);
+                    _regions, _bakePyramid, _pyramidFull, _coarseFullFrom, _fineQuality);
 
             // ③ 场景布置
             if (_placeInScene)

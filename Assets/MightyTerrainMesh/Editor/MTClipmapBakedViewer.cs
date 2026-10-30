@@ -30,7 +30,10 @@ namespace MightyTerrainMesh.EditorTools
         private class Entry
         {
             public string name;
-            public string path;
+            public string path;             // 逐文件模式；null = 归档模式（用 bin* 字段）
+            public string binPath;
+            public long binOffset;
+            public int binLen;
             public bool sRGB;
             public bool isNormal;
             public bool isFullTerrain;          // l7/l8：覆盖全地形（用于块区域叠加与世界坐标读数）
@@ -49,11 +52,15 @@ namespace MightyTerrainMesh.EditorTools
             public string error;
         }
 
-        // 金字塔瓦片引用：仅登记文件名，点选时才加载纹理解码（全量模式 L0 可达数万片）
+        // 金字塔瓦片引用：仅登记位置，点选时才加载纹理解码（全量模式 L0 可达数万片）。
+        // 两种来源：逐文件（pathA/pathN，旧版 tiles/ 目录）或归档（binPath + offset/lenA/lenN）。
         private class TileRef
         {
             public int level, tx, tz;
-            public string pathA, pathN; // albedo / normal 文件路径
+            public string pathA, pathN; // albedo / normal 文件路径（逐文件模式）
+            public string binPath;      // tiles.bin（归档模式）
+            public long offset;
+            public int lenA, lenN;
         }
 
         private string _dir = "Assets/Resources/ClipmapBaked";
@@ -166,12 +173,13 @@ namespace MightyTerrainMesh.EditorTools
                 _selected = 0;
         }
 
-        // 扫描 tiles/ 子目录的金字塔瓦片：只解析文件名（l{级}_{x}_{z}_{albedo|normal}.bytes），不读内容
+        // 扫描金字塔瓦片：旧版 tiles/ 子目录（只解析文件名）+ StreamingAssets 归档索引（tiles.idx），
+        // 两者互补，同键以逐文件条目为准
         void ScanTiles(string full)
         {
-            string tileDir = Path.Combine(full, "tiles");
-            if (!Directory.Exists(tileDir)) return;
             var byLevel = new Dictionary<int, Dictionary<long, TileRef>>();
+            string tileDir = Path.Combine(full, "tiles");
+            if (Directory.Exists(tileDir))
             foreach (var f in Directory.GetFiles(tileDir, "*.bytes"))
             {
                 var p = Path.GetFileNameWithoutExtension(f).Split('_');
@@ -193,6 +201,10 @@ namespace MightyTerrainMesh.EditorTools
                 }
                 if (albedo) tr.pathA = f; else tr.pathN = f;
             }
+            // 归档：与输出根对应的 StreamingAssets 目录下的 tiles.idx（绝对路径，避免依赖 CWD）
+            string idxPath = Path.Combine(
+                MTTerrainBakePipeline.ToFullPath(MTTerrainBakePipeline.StreamingRootOf(_dir)), "tiles.idx");
+            if (File.Exists(idxPath)) ScanArchive(idxPath, byLevel);
             foreach (var kv in byLevel)
             {
                 var list = new List<TileRef>(kv.Value.Values);
@@ -201,6 +213,37 @@ namespace MightyTerrainMesh.EditorTools
                 _tileLevels.Add(kv.Key);
             }
             _tileLevels.Sort();
+        }
+
+        void ScanArchive(string idxPath, Dictionary<int, Dictionary<long, TileRef>> byLevel)
+        {
+            try
+            {
+                var bytes = File.ReadAllBytes(idxPath);
+                if (bytes.Length < 12 || BitConverter.ToInt32(bytes, 0) != 0x4954544D) return; // 'MTTI'
+                int p = 8; // magic + 版本（仅 1 个版本，字段固定）
+                int count = BitConverter.ToInt32(bytes, p); p += 4;
+                string binPath = Path.Combine(Path.GetDirectoryName(idxPath), "tiles.bin");
+                for (int i = 0; i < count; ++i)
+                {
+                    int lvl = BitConverter.ToInt32(bytes, p); p += 4;
+                    int tx = BitConverter.ToInt32(bytes, p); p += 4;
+                    int tz = BitConverter.ToInt32(bytes, p); p += 4;
+                    long off = BitConverter.ToInt64(bytes, p); p += 8;
+                    int lenA = BitConverter.ToInt32(bytes, p); p += 4;
+                    int lenN = BitConverter.ToInt32(bytes, p); p += 4;
+                    if (!byLevel.TryGetValue(lvl, out var map))
+                    {
+                        map = new Dictionary<long, TileRef>();
+                        byLevel.Add(lvl, map);
+                    }
+                    long key = ((long)tx << 32) | (uint)tz;
+                    if (map.ContainsKey(key)) continue; // 同键以逐文件条目为准
+                    map.Add(key, new TileRef { level = lvl, tx = tx, tz = tz,
+                        binPath = binPath, offset = off, lenA = lenA, lenN = lenN });
+                }
+            }
+            catch (Exception e) { Debug.LogWarning("[ClipmapViewer] tiles.idx 解析失败: " + e.Message); }
         }
 
         static int SortKey(Entry e)
@@ -222,7 +265,7 @@ namespace MightyTerrainMesh.EditorTools
                 if (res <= 0) { e.error = "manifest 中没有该条目的有效分辨率"; return; }
                 e.width = e.height = res;
                 e.format = (TextureFormat)(e.isNormal ? _manifest.texFormatN : _manifest.texFormat);
-                var bytes = File.ReadAllBytes(e.path);
+                var bytes = e.path != null ? File.ReadAllBytes(e.path) : ReadSegment(e.binPath, e.binOffset, e.binLen);
                 // 依据纯 raw 数据长度判断是否含完整 mip 链。
                 int sizeNoMip = MipDataSize(e.width, e.height, e.format, false);
                 int sizeFull = MipDataSize(e.width, e.height, e.format, true);
@@ -243,6 +286,23 @@ namespace MightyTerrainMesh.EditorTools
                 e.mipCount = hasMips ? tex.mipmapCount : 1;
             }
             catch (Exception ex) { e.error = ex.Message; }
+        }
+
+        static byte[] ReadSegment(string path, long offset, int len)
+        {
+            using (var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read))
+            {
+                fs.Seek(offset, SeekOrigin.Begin);
+                var buf = new byte[len];
+                int read = 0;
+                while (read < len)
+                {
+                    int r = fs.Read(buf, read, len - read);
+                    if (r <= 0) throw new EndOfStreamException("tiles.bin 数据截断");
+                    read += r;
+                }
+                return buf;
+            }
         }
 
         static int MipDataSize(int w, int h, TextureFormat fmt, bool fullChain)
@@ -342,18 +402,21 @@ namespace MightyTerrainMesh.EditorTools
             DestroyEntry(_tileEntry);
             _tileEntry = null;
             string path = _tileAlbedo ? t.pathA : t.pathN;
-            if (path == null) return; // 该区域只烘了单一通道（理论上不发生，防御）
+            if (path == null && t.binPath == null) return; // 无逐文件也无归档（理论上不发生，防御）
             _tileEntry = new Entry
             {
                 name = $"l{t.level}_{t.tx}_{t.tz}_{(_tileAlbedo ? "albedo" : "normal")}",
                 path = path,
+                binPath = t.binPath,
+                binOffset = t.offset + (_tileAlbedo ? 0 : t.lenA), // 归档内 albedo 在前、normal 在后
+                binLen = _tileAlbedo ? t.lenA : t.lenN,
                 sRGB = _tileAlbedo,
                 isNormal = !_tileAlbedo,
                 isTile = true,
                 tileLevel = t.level,
                 tileX = t.tx,
                 tileZ = t.tz,
-                fileSize = new FileInfo(path).Length,
+                fileSize = path != null ? new FileInfo(path).Length : (_tileAlbedo ? t.lenA : t.lenN),
             };
             LoadEntry(_tileEntry);
             _mip = 0;
